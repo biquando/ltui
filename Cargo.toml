@@ -1,0 +1,14 @@
+[package]
+name = "ltui"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal interface for macOS launchd jobs"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+libc = "0.2"
+plist = "1"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
+shell-words = "1"
+tempfile = "3"
