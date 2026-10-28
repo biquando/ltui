@@ -4,7 +4,7 @@ use plist::Value;
 use std::{
     collections::BTreeMap,
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -61,7 +61,6 @@ impl Runner for Launchctl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Runtime {
     pub state: State,
-    pub exit: Option<String>,
 }
 
 pub fn parse_services(text: &str) -> Result<BTreeMap<String, Runtime>> {
@@ -102,11 +101,6 @@ pub fn parse_services(text: &str) -> Result<BTreeMap<String, Runtime>> {
                     State::Waiting
                 } else {
                     State::Running(pid)
-                },
-                exit: if numeric_exit {
-                    Some(exit.into())
-                } else {
-                    None
                 },
             },
         );
@@ -173,19 +167,6 @@ pub enum Action {
     Delete,
 }
 impl Action {
-    pub const ALL: [Self; 11] = [
-        Self::Load,
-        Self::Unload,
-        Self::Enable,
-        Self::Disable,
-        Self::Start,
-        Self::Restart,
-        Self::Stop,
-        Self::Kill,
-        Self::Hup,
-        Self::Reload,
-        Self::Delete,
-    ];
     pub fn title(self) -> &'static str {
         match self {
             Self::Load => "Load",
@@ -366,7 +347,6 @@ impl<R: Runner> Backend<R> {
                         }),
                     disabled,
                     override_disabled,
-                    exit: runtime.and_then(|s| s.exit.clone()),
                 });
             }
         }
@@ -391,7 +371,6 @@ impl<R: Runner> Backend<R> {
                         .ok()
                         .map(|_| override_disabled.unwrap_or(false)),
                     override_disabled,
-                    exit: runtime.exit.clone(),
                 });
             }
         }
@@ -448,12 +427,6 @@ impl<R: Runner> Backend<R> {
             }
         }
         Ok(text)
-    }
-    pub fn blame(&self, job: &Job) -> Result<String> {
-        if self.demo {
-            return Ok("Demo: launched in response to a timer firing".into());
-        }
-        self.run(&["blame", &job.target()])
     }
     pub fn check_collision(
         &self,
@@ -618,47 +591,6 @@ impl<R: Runner> Backend<R> {
     }
 }
 
-pub fn logs(job: &Job) -> String {
-    let mut text = String::new();
-    for key in ["StandardOutPath", "StandardErrorPath"] {
-        text.push_str(&format!("── {key} ──\n"));
-        let path = job
-            .definition
-            .as_ref()
-            .and_then(Value::as_dictionary)
-            .and_then(|d| d.get(key))
-            .and_then(Value::as_string);
-        let Some(path) = path else {
-            text.push_str("Not configured in the plist.\n\n");
-            continue;
-        };
-        text.push_str(path);
-        text.push('\n');
-        let result = (|| -> Result<String> {
-            let mut options = fs::OpenOptions::new();
-            options.read(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NONBLOCK);
-            }
-            let mut file = options.open(path)?;
-            ensure!(file.metadata()?.is_file(), "Not a regular file");
-            let size = file.metadata()?.len();
-            file.seek(SeekFrom::Start(size.saturating_sub(64 * 1024)))?;
-            let mut bytes = Vec::new();
-            file.take(64 * 1024).read_to_end(&mut bytes)?;
-            Ok(String::from_utf8_lossy(&bytes).into())
-        })();
-        match result {
-            Ok(s) => text.push_str(&s),
-            Err(e) => text.push_str(&format!("{e:#}")),
-        }
-        text.push_str("\n\n");
-    }
-    text
-}
-
 fn demo_inventory(scope: Scope, home: &Path, agent_domain: &str) -> Inventory {
     let names = [
         "local.backup",
@@ -705,7 +637,6 @@ fn demo_inventory(scope: Scope, home: &Path, agent_domain: &str) -> Inventory {
                 },
                 disabled: Some(i == 5),
                 override_disabled: if i == 5 { Some(true) } else { None },
-                exit: Some("0".into()),
             }
         })
         .collect();
@@ -758,9 +689,9 @@ mod tests {
     fn parses_live_and_legacy_disable_formats() {
         let s = parse_services("gui/501 = {\n services = {\n 42 - local.running\n 0 -9 local.idle\n 12 (jt) local.tagged\n }\n}").unwrap();
         assert_eq!(s["local.running"].state, State::Running(42));
-        assert_eq!(s["local.idle"].exit.as_deref(), Some("-9"));
+
         assert_eq!(s["local.tagged"].state, State::Running(12));
-        assert_eq!(s["local.tagged"].exit, None);
+
         let d =
             parse_disabled("disabled services = {\n\"a\" => disabled\n\"b\" => false\n}").unwrap();
         assert!(d["a"]);

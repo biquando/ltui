@@ -107,7 +107,6 @@ pub struct Job {
     pub state: State,
     pub disabled: Option<bool>,
     pub override_disabled: Option<bool>,
-    pub exit: Option<String>,
 }
 impl Job {
     pub fn target(&self) -> String {
@@ -556,7 +555,7 @@ impl Form {
                 "Use KEY=value pairs, separated by spaces or newlines.\nQuote spaces: MODE=dev MESSAGE='hello world'\nEmpty value: EMPTY=''. No export, commas, or expansion.\nBlank clears all variables."
             }
             _ => {
-                "Label changes keep the filename. Unload before renaming.\nUse E on the job list to edit other advanced options."
+                "Label changes keep the filename. Unload before renaming.\nEnter opens the full plist in $EDITOR from the job list."
             }
         }
     }

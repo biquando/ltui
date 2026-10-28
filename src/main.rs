@@ -121,6 +121,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
                 Event::Key(key) if key.kind != KeyEventKind::Release => match app.handle(key) {
                     Effect::Quit => break,
                     Effect::None => {}
+                    Effect::Log(key) => match app.prepare_log(key) {
+                        Err(e) => app.error(format!("{e:#}")),
+                        Ok(session) => {
+                            restore_terminal();
+                            let result = session.run();
+                            *terminal = init_terminal()?;
+                            if let Err(e) = result {
+                                app.error(format!("{e:#}"));
+                            }
+                        }
+                    },
                     Effect::Editor => match app.prepare_editor() {
                         Err(e) => app.error(format!("{e:#}")),
                         Ok(session) => {

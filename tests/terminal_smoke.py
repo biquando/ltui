@@ -17,11 +17,13 @@ BINARY = Path(__file__).resolve().parents[1] / "target/debug/ltui"
 
 
 class Session:
-    def __init__(self, home, editor, *args):
+    def __init__(self, home, editor, *args, pager=None):
         self.pid, self.fd = pty.fork()
         if not self.pid:
             env = dict(os.environ, HOME=str(home), EDITOR=editor, TERM="xterm-256color")
             env.pop("SUDO_UID", None)
+            if pager is not None:
+                env["PAGER"] = pager
             os.execve(str(BINARY), [str(BINARY), *args], env)
         self.output = b""
         self.exited = False
@@ -109,7 +111,7 @@ Path(sys.argv[3]).write_text(str(p))
             session = Session(home, command)
             try:
                 session.until(lambda: b"launchd job manager" in session.output)
-                session.send(b"E")
+                session.send(b"\r" if mode == "valid" else b" j\r")
                 session.until(record.exists)
                 if mode == "valid":
                     session.until(lambda: path.read_bytes() != before)
@@ -124,6 +126,33 @@ Path(sys.argv[3]).write_text(str(p))
                     assert recovery.read_text() == "not a plist"
                     session.send(b"\x1b")
                     recovery.unlink()
+                session.close()
+            finally:
+                session.cleanup()
+        # Open both configured logs through the file section of the action menu.
+        pager_script = home / "pager script.py"
+        pager_record = home / "pager-record.txt"
+        pager_script.write_text('''import sys
+from pathlib import Path
+assert sys.argv[1] == "two words"
+Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
+''')
+        stdout = home / "stdout log.txt"
+        stderr = home / "stderr log.txt"
+        stdout.write_text("stdout content")
+        stderr.write_text("stderr content")
+        v = plistlib.loads(path.read_bytes())
+        v.update(StandardOutPath=str(stdout), StandardErrorPath=str(stderr))
+        path.write_bytes(plistlib.dumps(v))
+        for index, log in [(2, stdout), (3, stderr)]:
+            pager_record.unlink(missing_ok=True)
+            pager = shlex.join([sys.executable, str(pager_script), "two words", str(pager_record)])
+            session = Session(home, "vi", pager=pager)
+            try:
+                session.until(lambda: b"launchd job manager" in session.output)
+                session.send(b" " + b"j" * index + b"\r")
+                session.until(pager_record.exists)
+                assert pager_record.read_text() == log.read_text()
                 session.close()
             finally:
                 session.cleanup()

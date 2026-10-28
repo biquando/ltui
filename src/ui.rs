@@ -1,10 +1,11 @@
 use crate::{
-    app::{App, Detail, Modal},
+    app::{App, MenuAction, Modal},
     launchd::Action,
     model::{FIELD_NAMES, Form, Scope, State},
 };
 use ratatui::{
     Frame,
+    buffer::CellWidth,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -19,6 +20,12 @@ const ACCENT: Color = Color::Rgb(99, 218, 210);
 const GREEN: Color = Color::Rgb(148, 219, 155);
 const YELLOW: Color = Color::Rgb(245, 204, 122);
 const RED: Color = Color::Rgb(243, 139, 150);
+const LINE_NUMBER: Color = Color::Rgb(144, 162, 186);
+const XML_TAG: Color = Color::Rgb(166, 202, 240);
+const XML_KEY: Color = Color::Rgb(255, 255, 255);
+const XML_STRING: Color = Color::Rgb(202, 229, 180);
+const XML_NUMBER: Color = Color::Rgb(249, 216, 155);
+const XML_META: Color = Color::Rgb(166, 184, 208);
 fn style(color: Color) -> Style {
     Style::default().fg(color)
 }
@@ -78,10 +85,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(2),
         Constraint::Min(6),
         Constraint::Length(2),
-        Constraint::Length(2),
+        Constraint::Length(1),
     ])
     .split(area);
-    let header = Layout::horizontal([Constraint::Min(20), Constraint::Length(40)]).split(rows[0]);
+    let header = Layout::horizontal([
+        Constraint::Min(20),
+        Constraint::Length(if app.backend.demo { 40 } else { 0 }),
+    ])
+    .split(rows[0]);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ltui ", style(ACCENT).add_modifier(Modifier::BOLD)),
@@ -89,17 +100,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])),
         header[0],
     );
-    let mode = if app.backend.demo {
-        "DEMO · read-only"
-    } else {
-        app.scope.domain(&app.backend.agent_domain)
-    };
-    f.render_widget(
-        Paragraph::new(mode)
-            .alignment(Alignment::Right)
-            .style(style(ACCENT)),
-        header[1],
-    );
+    if app.backend.demo {
+        f.render_widget(
+            Paragraph::new("DEMO · read-only")
+                .alignment(Alignment::Right)
+                .style(style(ACCENT)),
+            header[1],
+        );
+    }
     let labels = if area.width < 90 {
         [
             "User", "Shared", "Daemon", "A.Agent", "A.Daem", "Session", "System",
@@ -181,41 +189,34 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         rows[4],
     );
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(" n", style(ACCENT)),
-                Span::raw(" new  "),
-                Span::styled("e", style(ACCENT)),
-                Span::raw(" edit  "),
-                Span::styled("E", style(ACCENT)),
-                Span::raw(" $EDITOR  "),
-                Span::styled("a", style(ACCENT)),
-                Span::raw(" actions  "),
-                Span::styled("t", style(ACCENT)),
-                Span::raw(" enable/disable  "),
-                Span::styled("?", style(ACCENT)),
-                Span::raw(" help  "),
-                Span::styled("q", style(ACCENT)),
-                Span::raw(" quit"),
-            ]),
-            Line::styled(
-                " Tab scope · ↑↓ select · ←→ detail tab · Enter focus detail · R refresh",
-                style(MUTED),
-            ),
-        ]),
+        Paragraph::new(Line::from(vec![
+            Span::styled(" n", style(ACCENT)),
+            Span::raw(" new  "),
+            Span::styled("Space", style(ACCENT)),
+            Span::raw(" actions  "),
+            Span::styled("Enter", style(ACCENT)),
+            Span::raw(" edit plist  "),
+            Span::styled("R", style(ACCENT)),
+            Span::raw(" refresh  "),
+            Span::styled("?", style(ACCENT)),
+            Span::raw(" help  "),
+            Span::styled("q", style(ACCENT)),
+            Span::raw(" quit"),
+        ])),
         rows[5],
     );
     draw_modal(f, app);
 }
 
 fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
+    app.page_size = area.height.saturating_sub(4).max(1) as usize;
     let b = block(
         format!(
             " {} · {} ",
             app.scope.title(),
             app.scope.domain(&app.backend.agent_domain)
         ),
-        !app.focus_detail,
+        true,
     );
     if app.visible.is_empty() {
         let inner = b.inner(area);
@@ -285,81 +286,169 @@ fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(table, area, &mut app.table);
 }
 
-fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
-    let b = block(format!(" {} · ← → ", app.detail.title()), app.focus_detail);
+fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
+    let b = block(" Plist · J/K scroll ", false);
     let inner = b.inner(area);
+    app.preview_height = inner.height;
     f.render_widget(b, area);
-    if let Some(job) = app.selected() {
-        if app.detail == Detail::Summary {
-            let d = job
-                .definition
-                .as_ref()
-                .and_then(plist::Value::as_dictionary);
-            let mut value = format!(
-                "{}\n\nRuntime    {}\nPolicy     {}{}\nLast exit  {}\nDomain     {}\n\nPLIST\n{}\n\nCOMMAND / ARGUMENTS\n{}",
-                job.label,
-                job.state.text(),
-                job.enabled_text(),
-                if job.disabled.is_none() {
-                    " (status unavailable)"
-                } else if job.override_disabled.is_some() {
-                    " (launchctl override)"
-                } else {
-                    " (plist default)"
-                },
-                job.exit.as_deref().unwrap_or("—"),
-                job.domain,
-                job.path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "No plist found · runtime service".into()),
-                if job.command().is_empty() {
-                    "Not available".into()
-                } else {
-                    job.command()
-                }
-            );
-            if let Some(d) = d {
-                value.push_str("\n\nOPTIONS\n");
-                for key in [
-                    "Program",
-                    "RunAtLoad",
-                    "KeepAlive",
-                    "StartInterval",
-                    "StartCalendarInterval",
-                    "WorkingDirectory",
-                    "UserName",
-                    "GroupName",
-                    "StandardOutPath",
-                    "StandardErrorPath",
-                ] {
-                    if let Some(v) = d.get(key) {
-                        let s = match v {
-                            plist::Value::String(s) => s.clone(),
-                            plist::Value::Boolean(b) => b.to_string(),
-                            plist::Value::Integer(n) => n.to_string(),
-                            _ => "configured · see Plist tab".into(),
-                        };
-                        value.push_str(&format!("{key}  {s}\n"));
-                    }
-                }
-            }
-            if let Some(error) = &job.error {
-                value.push_str(&format!(
-                    "\nPLIST ERROR\n{error}\nUse E to repair the full file."
-                ));
-            }
-            if job.read_only() {
-                value.push_str("\n\nApple system plist · file editing is read-only.");
-            }
-            value.push_str("\n\nEnable/disable controls future loads.\nLoad/unload controls registration now.\nEdits take effect when the job is reloaded.");
-            text(f, inner, value, app.detail_scroll);
-        } else {
-            text(f, inner, app.detail_text.clone(), app.detail_scroll);
+    if app.selected().is_some() {
+        if inner.width == 0 || inner.height == 0 {
+            return;
         }
+        let lines = highlight_plist(&clean(&app.detail_text));
+        let digits = lines.len().max(1).to_string().len();
+        let gutter_width = (digits as u16 + 2).min(inner.width.saturating_sub(1));
+        let content = Rect::new(
+            inner.x + gutter_width,
+            inner.y,
+            inner.width - gutter_width,
+            inner.height,
+        );
+        let mut numbers = Vec::new();
+        let mut wrapped = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let rows = hard_wrap_line(line, content.width);
+            numbers.push(Line::from(format!(" {:>digits$} ", index + 1)));
+            // Wrapped rows belong to the same source line; leave their gutter blank.
+            numbers.extend((1..rows.len()).map(|_| Line::default()));
+            wrapped.extend(rows);
+        }
+        // Use the same rows for rendering, numbering, and the scroll limit.
+        // Stop at the last full viewport; files that fit cannot scroll.
+        let max_scroll = wrapped
+            .len()
+            .saturating_sub(content.height as usize)
+            .min(u16::MAX as usize) as u16;
+        let scroll = app.detail_scroll.min(max_scroll);
+        // Dialogs use this offset for their own content while they are open.
+        if app.modal.is_none() {
+            app.detail_scroll = scroll;
+        }
+        f.render_widget(
+            Paragraph::new(numbers)
+                .style(style(LINE_NUMBER))
+                .scroll((scroll, 0)),
+            Rect::new(inner.x, inner.y, gutter_width, inner.height),
+        );
+        f.render_widget(Paragraph::new(wrapped).scroll((scroll, 0)), content);
     } else {
-        text(f, inner, "\n Select a job to inspect its configuration.", 0);
+        text(f, inner, "Select a job to view its plist.", 0);
     }
+}
+
+fn hard_wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
+    let mut rows = vec![Line::default()];
+    let mut used = 0;
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let cells = grapheme.symbol.cell_width();
+        if cells > width {
+            continue;
+        }
+        if used + cells > width {
+            rows.push(Line::default());
+            used = 0;
+        }
+        let spans = &mut rows.last_mut().unwrap().spans;
+        if let Some(last) = spans.last_mut()
+            && last.style == grapheme.style
+        {
+            last.content.to_mut().push_str(grapheme.symbol);
+        } else {
+            spans.push(Span::styled(grapheme.symbol.to_owned(), grapheme.style));
+        }
+        used += cells;
+    }
+    rows
+}
+
+/// Color the XML without changing its text or source-line boundaries.
+fn highlight_plist(source: &str) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::default()];
+    let mut offset = 0;
+    let mut value_color = FG;
+    while offset < source.len() {
+        let rest = &source[offset..];
+        let (length, color) = if rest.starts_with("<!--") {
+            (rest.find("-->").map_or(rest.len(), |i| i + 3), XML_META)
+        } else if rest.starts_with("<![CDATA[") {
+            (rest.find("]]>").map_or(rest.len(), |i| i + 3), value_color)
+        } else if rest.starts_with("<?") {
+            (rest.find("?>").map_or(rest.len(), |i| i + 2), XML_META)
+        } else if rest.starts_with('<') {
+            let length = xml_tag_end(rest);
+            let tag = &rest[..length];
+            let name = tag
+                .trim_start_matches('<')
+                .trim_start_matches('/')
+                .split([' ', '\t', '\n', '\r', '/', '>'])
+                .next()
+                .unwrap_or_default();
+            let metadata = tag.starts_with("<!");
+            if !metadata {
+                value_color = if tag.starts_with("</") || tag.ends_with("/>") {
+                    FG
+                } else {
+                    match name {
+                        "key" => XML_KEY,
+                        "string" => XML_STRING,
+                        "integer" | "real" | "date" => XML_NUMBER,
+                        _ => FG,
+                    }
+                };
+            }
+            (
+                length,
+                if metadata {
+                    XML_META
+                } else if matches!(name, "true" | "false") {
+                    XML_NUMBER
+                } else {
+                    XML_TAG
+                },
+            )
+        } else {
+            (rest.find('<').unwrap_or(rest.len()), value_color)
+        };
+        for (index, part) in rest[..length].split('\n').enumerate() {
+            if index > 0 {
+                lines.push(Line::default());
+            }
+            if !part.is_empty() {
+                lines
+                    .last_mut()
+                    .unwrap()
+                    .spans
+                    .push(Span::styled(part.to_owned(), style(color)));
+            }
+        }
+        offset += length;
+    }
+    // Match Paragraph's normal handling of a terminating newline.
+    if source.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
+fn xml_tag_end(text: &str) -> usize {
+    let mut quote = None;
+    let mut subset_depth: usize = 0;
+    for (index, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                '\'' | '"' => quote = Some(c),
+                '[' => subset_depth += 1,
+                ']' => subset_depth = subset_depth.saturating_sub(1),
+                '>' if subset_depth == 0 => return index + 1,
+                _ => {}
+            }
+        }
+    }
+    text.len()
 }
 
 fn draw_modal(f: &mut Frame, app: &App) {
@@ -369,7 +458,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
     match modal {
         Modal::Help => {
             let inner = popup(f, centered(f.area(), 86, 34), " Keyboard shortcuts ".into());
-            let mut value = "NAVIGATION\n  ↑/↓ or j/k     Select a job (or scroll the focused detail pane)\n  Tab / Shift-Tab Next / previous scope\n  /              Filter by label, command, runtime, or enabled state\n  Esc            Clear filter\n  ←/→            Switch overview / plist / runtime / logs / launch reason\n  Enter          Focus the detail pane; Enter again returns to the list\n  PgUp/PgDn      Move or scroll one page · g/G first/last job\n\nJOBS\n  n              Create a plist in the current scope\n  e              Edit common options (other keys are preserved)\n  E              Edit full XML plist in $EDITOR, then validate and save\n  a              All launchctl actions and explanations\n  l / u          Load / unload\n  s / r          Run now / restart\n  t              Toggle enabled / disabled (independent of load state)\n  x              Unload and delete the plist (requires y confirmation)\n  p / o          Show plist / configured stdout and stderr log files\n  R              Refresh (also refreshes automatically every 5 seconds)\n  q / Ctrl-C     Quit\n\nFORM\n  Tab/Shift-Tab  Move between fields · Ctrl-U clear field\n  ↑/↓            Move between lines (between fields at edges)\n  ←/→ Home/End   Move within a line · Ctrl-Home/End whole field\n  Enter          Insert newline in arguments/calendar/environment\n  Ctrl-S         Save · Esc cancel\n\nSystem jobs require root for changes. Apple plists are read-only.\nPress Enter, Esc, or ? to close. PgUp/PgDn scroll this help.".to_string();
+            let mut value = "NAVIGATION\n  ↑/↓ or j/k     Select a job (also Ctrl-N/Ctrl-P)\n  Tab/Shift-Tab  Next / previous scope\n  /              Filter jobs · Esc clears the filter\n  Space          Open actions (edit, $EDITOR, logs, launchctl)\n  Enter          Open the selected plist in $EDITOR\n  Ctrl-U/Ctrl-D  Previous / next half page of jobs\n  PgUp/PgDn      Previous / next full page of jobs\n  J/K            Scroll the plist down/up by half its visible height\n  g/G            First / last job\n\nJOBS\n  n              Create a plist in the current scope\n  e              Edit common options (other keys are preserved)\n  l/u            Load / unload\n  s/r            Run now / restart\n  t              Toggle enabled / disabled\n  x              Unload and delete the plist (requires y confirmation)\n  R              Refresh (also automatically every 5 seconds)\n  q/Ctrl-C       Quit\n\nFORMS\n  Tab/Shift-Tab  Move fields (also Ctrl-N/Ctrl-P) · Ctrl-U clears\n  ↑/↓            Move between lines (between fields at edges)\n  ←/→ Home/End   Move within a line · Ctrl-Home/End whole field\n  Enter          Insert newline in arguments/calendar/environment\n  Ctrl-S         Save · Esc cancel\n\nSystem jobs require root for changes. Apple plists are read-only.\nEnter / Esc / ? closes help. PgUp/PgDn or Ctrl-U/Ctrl-D scrolls help.".to_string();
             if !app.warnings.is_empty() {
                 value.push_str("\n\nINVENTORY WARNINGS\n");
                 value.push_str(&app.warnings.join("\n\n"));
@@ -414,29 +503,39 @@ fn draw_modal(f: &mut Frame, app: &App) {
         Modal::Actions(selected) => {
             let inner = popup(f, centered(f.area(), 86, 29), " Job actions ".into());
             let rows = Layout::vertical([Constraint::Min(6), Constraint::Length(5)]).split(inner);
-            let start = selected.saturating_sub(rows[0].height.saturating_sub(1) as usize);
-            let lines: Vec<Line> = Action::ALL
-                .iter()
-                .enumerate()
-                .skip(start)
-                .map(|(i, a)| {
-                    Line::styled(
-                        format!(" {} {}", if i == *selected { "›" } else { " " }, a.title()),
-                        if i == *selected {
-                            style(BG).bg(ACCENT).add_modifier(Modifier::BOLD)
-                        } else {
-                            style(FG)
-                        },
-                    )
-                })
-                .collect();
-            f.render_widget(Paragraph::new(lines), rows[0]);
+            let selected_line = selected
+                + if *selected < MenuAction::FILE_COUNT {
+                    1
+                } else {
+                    3
+                };
+            let scroll = selected_line.saturating_sub(rows[0].height.saturating_sub(1) as usize);
+            let mut lines = vec![Line::styled(" FILES", style(MUTED))];
+            for (i, action) in MenuAction::ALL.iter().enumerate() {
+                if i == MenuAction::FILE_COUNT {
+                    lines.push(Line::raw(""));
+                    lines.push(Line::styled(" LAUNCHCTL", style(MUTED)));
+                }
+                lines.push(Line::styled(
+                    format!(
+                        " {} {}",
+                        if i == *selected { "›" } else { " " },
+                        action.title()
+                    ),
+                    if i == *selected {
+                        style(BG).bg(ACCENT).add_modifier(Modifier::BOLD)
+                    } else {
+                        style(FG)
+                    },
+                ));
+            }
+            f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), rows[0]);
             text(
                 f,
                 rows[1],
                 format!(
                     "{}\n\n↑↓ choose · Enter select · Esc close",
-                    Action::ALL[*selected].description()
+                    MenuAction::ALL[*selected].description()
                 ),
                 0,
             );
@@ -481,7 +580,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
                     rows[2],
                 );
             }
-            f.render_widget(Paragraph::new(" Ctrl-S save · Esc cancel · Tab/Shift-Tab field · Ctrl-U clear\n ↑↓ line/field · Enter newline in args/calendar/env · Home/End line").style(style(ACCENT)), rows[3]);
+            f.render_widget(Paragraph::new(" Ctrl-S save · Esc cancel · Tab/Ctrl-N next · Shift-Tab/Ctrl-P prev\n ↑↓ line/field · Enter newline in args/calendar/env · Home/End line").style(style(ACCENT)), rows[3]);
         }
     }
 }
@@ -692,11 +791,8 @@ mod tests {
         let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
         for (w, h) in [(160, 45), (100, 32), (65, 18), (30, 10)] {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-            for detail in Detail::ALL {
-                app.detail = detail;
-                app.load_detail();
-                terminal.draw(|f| draw(f, &mut app)).unwrap();
-            }
+            app.load_detail();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
             for modal in [
                 Modal::Help,
                 Modal::Actions(0),
@@ -736,6 +832,219 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+    #[test]
+    fn right_panel_is_plist_and_actions_have_file_and_launchctl_sections() {
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|f| draw_detail(f, &mut app, f.area()))
+            .unwrap();
+        let rendered = screen(&terminal);
+        assert!(rendered.contains("<?xml"));
+        assert!(rendered.contains("<key>Label</key>"));
+        assert!(!rendered.contains("COMMAND / ARGUMENTS"));
+        app.modal = Some(Modal::Actions(0));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let rendered = screen(&terminal);
+        assert!(rendered.find("FILES").unwrap() < rendered.find("Edit with $EDITOR").unwrap());
+        assert!(rendered.find("Open stderr log").unwrap() < rendered.find("LAUNCHCTL").unwrap());
+        assert!(rendered.contains("Reload plist"));
+        let mut small = Terminal::new(TestBackend::new(65, 18)).unwrap();
+        app.modal = Some(Modal::Actions(MenuAction::ALL.len() - 1));
+        small.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&small).contains("› Delete job"));
+    }
+    #[test]
+    fn plist_scrolling_stops_at_the_last_full_view() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        app.detail_text = "first line\nlast line".into();
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        app.detail_scroll = u16::MAX;
+        terminal
+            .draw(|f| draw_detail(f, &mut app, f.area()))
+            .unwrap();
+        assert_eq!(app.detail_scroll, 0);
+        assert!(screen(&terminal).contains("last line"));
+        app.handle(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE));
+        terminal
+            .draw(|f| draw_detail(f, &mut app, f.area()))
+            .unwrap();
+        assert_eq!(app.detail_scroll, 0);
+        app.handle(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE));
+        terminal
+            .draw(|f| draw_detail(f, &mut app, f.area()))
+            .unwrap();
+        assert_eq!(app.detail_scroll, 0);
+        assert!(screen(&terminal).contains("first line"));
+
+        app.detail_text = "abcdefghijABCDEFGHIJ0123456789".into();
+        app.detail_scroll = u16::MAX;
+        let mut narrow = Terminal::new(TestBackend::new(15, 4)).unwrap();
+        narrow.draw(|f| draw_detail(f, &mut app, f.area())).unwrap();
+        assert_eq!(app.detail_scroll, 1);
+        assert!(screen(&narrow).contains("0123456789"));
+        let mut wide = Terminal::new(TestBackend::new(35, 8)).unwrap();
+        wide.draw(|f| draw_detail(f, &mut app, f.area())).unwrap();
+        assert_eq!(app.detail_scroll, 0);
+        assert!(screen(&wide).contains(&app.detail_text));
+
+        app.detail_text = (0..10)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.detail_scroll = u16::MAX;
+        let mut short = Terminal::new(TestBackend::new(30, 6)).unwrap();
+        for _ in 0..2 {
+            short.draw(|f| draw_detail(f, &mut app, f.area())).unwrap();
+            assert_eq!(app.detail_scroll, 6);
+            let bottom: String = short
+                .backend()
+                .buffer()
+                .content
+                .chunks(30)
+                .nth(4)
+                .unwrap()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(bottom.contains("line 9"));
+            app.handle(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE));
+        }
+        let mut tall = Terminal::new(TestBackend::new(30, 14)).unwrap();
+        tall.draw(|f| draw_detail(f, &mut app, f.area())).unwrap();
+        assert_eq!(app.detail_scroll, 0);
+    }
+    #[test]
+    fn plist_highlighting_preserves_source_and_distinguishes_xml_tokens() {
+        let source = "<?xml version=\"1.0\"?>\n<!-- <key>comment\ncontinued -->\n<key>Name</key>\n<string>hello &amp; world</string>\n<integer>42</integer>\n<true/>\n";
+        let lines = highlight_plist(source);
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text, source.strip_suffix('\n').unwrap());
+        for (token, color) in [
+            ("<key>", XML_TAG),
+            ("Name", XML_KEY),
+            ("hello &amp; world", XML_STRING),
+            ("42", XML_NUMBER),
+            ("<true/>", XML_NUMBER),
+            ("continued -->", XML_META),
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .any(|span| span.content == token && span.style.fg == Some(color)),
+                "Missing style for {token}"
+            );
+        }
+        let quoted = "<plist note=\"a > b\">\n<key>Real</key>\n<string><![CDATA[a < b]]></string>";
+        let lines = highlight_plist(quoted);
+        assert_eq!(lines[0].spans[0].content, "<plist note=\"a > b\">");
+        assert!(
+            lines[2].spans.iter().any(
+                |span| span.content == "<![CDATA[a < b]]>" && span.style.fg == Some(XML_STRING)
+            )
+        );
+    }
+    #[test]
+    fn plist_gutter_numbers_source_lines_and_leaves_wrapped_rows_blank() {
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        app.detail_text = "abcdefghijABCDEFGHIJ0123456789\nlast".into();
+        // Border (2) + gutter (3) leave ten cells for each wrapped row.
+        let mut terminal = Terminal::new(TestBackend::new(15, 8)).unwrap();
+        terminal
+            .draw(|f| draw_detail(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(2, 1)].symbol(), "1");
+        assert_eq!(buf[(2, 1)].fg, LINE_NUMBER);
+        assert!(!buf[(2, 1)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(2, 2)].symbol(), " ");
+        assert_eq!(buf[(2, 3)].symbol(), " ");
+        assert_eq!(buf[(2, 4)].symbol(), "2");
+        app.detail_scroll = 2;
+        let mut terminal = Terminal::new(TestBackend::new(15, 4)).unwrap();
+        terminal
+            .draw(|f| draw_detail(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(2, 1)].symbol(), " ");
+        assert_eq!(buf[(2, 2)].symbol(), "2");
+        assert!(screen(&terminal).contains("0123456789"));
+    }
+    #[test]
+    fn plist_wraps_at_the_right_edge_without_preserving_word_boundaries() {
+        let line = Line::styled("   alpha beta gamma", style(XML_STRING));
+        let rows = hard_wrap_line(&line, 10);
+        let text: Vec<_> = rows
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(text, ["   alpha b", "eta gamma"]);
+        assert!(
+            rows.iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.fg == Some(XML_STRING))
+        );
+        let rows = hard_wrap_line(&Line::raw("abc界de\u{301}f"), 5);
+        let text: Vec<_> = rows
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(text, ["abc界", "de\u{301}f"]);
+    }
+    #[test]
+    fn plist_half_page_scrolling_follows_the_visible_height_after_resizing() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        app.detail_text = (0..100)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (height, step) in [(14, 6), (8, 3), (3, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(30, height)).unwrap();
+            terminal
+                .draw(|f| draw_detail(f, &mut app, f.area()))
+                .unwrap();
+            app.handle(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE));
+            terminal
+                .draw(|f| draw_detail(f, &mut app, f.area()))
+                .unwrap();
+            assert_eq!(app.detail_scroll, step);
+            let top: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(30)
+                .nth(1)
+                .unwrap()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(top.contains(&format!("line {step}")));
+            app.handle(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE));
+            assert_eq!(app.detail_scroll, 0);
         }
     }
 }

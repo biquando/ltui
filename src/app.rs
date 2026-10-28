@@ -1,5 +1,5 @@
 use crate::{
-    launchd::{self, Action, Backend, Launchctl},
+    launchd::{Action, Backend, Launchctl},
     model::{self, Form, Job, Scope, State},
 };
 use anyhow::{Context, Result, ensure};
@@ -14,29 +14,49 @@ use std::{
     time::Instant,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Detail {
-    Summary,
-    Plist,
-    Runtime,
-    Logs,
-    Blame,
+#[derive(Clone, Copy)]
+pub enum MenuAction {
+    Edit,
+    Editor,
+    Log(&'static str),
+    Launchctl(Action),
 }
-impl Detail {
-    pub const ALL: [Self; 5] = [
-        Self::Summary,
-        Self::Plist,
-        Self::Runtime,
-        Self::Logs,
-        Self::Blame,
+impl MenuAction {
+    pub const FILE_COUNT: usize = 4;
+    pub const ALL: [Self; 15] = [
+        Self::Edit,
+        Self::Editor,
+        Self::Log("StandardOutPath"),
+        Self::Log("StandardErrorPath"),
+        Self::Launchctl(Action::Load),
+        Self::Launchctl(Action::Unload),
+        Self::Launchctl(Action::Enable),
+        Self::Launchctl(Action::Disable),
+        Self::Launchctl(Action::Start),
+        Self::Launchctl(Action::Restart),
+        Self::Launchctl(Action::Stop),
+        Self::Launchctl(Action::Kill),
+        Self::Launchctl(Action::Hup),
+        Self::Launchctl(Action::Reload),
+        Self::Launchctl(Action::Delete),
     ];
     pub fn title(self) -> &'static str {
         match self {
-            Self::Summary => "Overview",
-            Self::Plist => "Plist",
-            Self::Runtime => "launchctl print",
-            Self::Logs => "Log files",
-            Self::Blame => "Why running?",
+            Self::Edit => "Edit",
+            Self::Editor => "Edit with $EDITOR",
+            Self::Log("StandardOutPath") => "Open stdout log",
+            Self::Log(_) => "Open stderr log",
+            Self::Launchctl(a) => a.title(),
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit common plist options in the form.",
+            Self::Editor => "Edit the whole plist in $EDITOR, then validate and save.",
+            Self::Log(_) => {
+                "Open the configured log file in $PAGER (default: less). Quit the pager to return."
+            }
+            Self::Launchctl(a) => a.description(),
         }
     }
 }
@@ -51,6 +71,7 @@ pub enum Effect {
     None,
     Quit,
     Editor,
+    Log(&'static str),
 }
 
 pub struct App {
@@ -61,14 +82,14 @@ pub struct App {
     pub table: TableState,
     pub filter: String,
     pub searching: bool,
-    pub detail: Detail,
     pub detail_text: String,
     pub detail_scroll: u16,
+    pub preview_height: u16,
     pub modal: Option<Modal>,
     pub notice: String,
     pub warnings: Vec<String>,
     pub refreshed: Instant,
-    pub focus_detail: bool,
+    pub page_size: usize,
 }
 
 impl App {
@@ -86,14 +107,14 @@ impl App {
             table: TableState::default(),
             filter: String::new(),
             searching: false,
-            detail: Detail::Summary,
             detail_text: String::new(),
             detail_scroll: 0,
+            preview_height: 0,
             modal: None,
-            notice: "Ready · ? for all shortcuts".into(),
+            notice: String::new(),
             warnings: vec![],
             refreshed: Instant::now(),
-            focus_detail: false,
+            page_size: 10,
         };
         app.refresh();
         app
@@ -175,20 +196,17 @@ impl App {
         };
         // Resolve runtime-only plist paths on demand, avoiding a command per row.
         let job = &mut self.jobs[index];
-        let runtime =
-            if job.state.loaded() && (job.path.is_none() || self.detail == Detail::Runtime) {
-                Some(self.backend.details(job))
-            } else {
-                None
-            };
-        self.detail_text = match self.detail {
-            Detail::Summary => String::new(),
-            Detail::Plist => job.definition.as_ref().map(model::xml).map(|r| r.map(|s| String::from_utf8_lossy(&s).into_owned())).unwrap_or_else(|| Ok("No readable plist. Press E to repair an invalid file in $EDITOR, or choose a job with a plist.".into())).unwrap_or_else(|e| format!("{e:#}")),
-            Detail::Runtime => runtime.unwrap_or_else(|| self.backend.details(job)).unwrap_or_else(|e| format!("{e:#}")),
-            Detail::Logs => launchd::logs(job),
-            Detail::Blame => self.backend.blame(job).unwrap_or_else(|e| format!("{e:#}")),
-        };
+        if job.state.loaded() && job.path.is_none() {
+            let _ = self.backend.details(job);
+        }
+        self.detail_text = job.definition.as_ref().map(model::xml)
+            .map(|r| r.map(|s| String::from_utf8_lossy(&s).into_owned()))
+            .unwrap_or_else(|| {
+                if let Some(bytes) = &job.file_bytes { Ok(String::from_utf8_lossy(bytes).into_owned()) }
+                else { Ok("No readable plist. Press Enter to repair the file in $EDITOR, or select a job with a plist.".into()) }
+            }).unwrap_or_else(|e| format!("{e:#}"));
     }
+
     fn select(&mut self, delta: isize) {
         if self.visible.is_empty() {
             return;
@@ -261,7 +279,7 @@ impl App {
             ensure!(!job.read_only(), "Apple system plists are read-only");
             ensure!(
                 job.error.is_none(),
-                "This plist has an error. Use E to edit the full file or resolve duplicate Labels first"
+                "This plist has an error. Press Enter to edit the full file in $EDITOR or resolve duplicate Labels first"
             );
             let path = job
                 .path
@@ -319,7 +337,6 @@ impl App {
             state: State::Unloaded,
             disabled: Some(false),
             override_disabled: None,
-            exit: None,
         });
         saved.label = label.into();
         saved.definition = Some(value.clone());
@@ -358,6 +375,24 @@ impl App {
         self.commit(&value, &path, form.bytes.as_deref(), form.job.as_ref())
     }
     pub fn handle(&mut self, key: KeyEvent) -> Effect {
+        // Reuse j/k navigation without turning control keys into typed text.
+        let mut key = key;
+        if !self.searching
+            && !matches!(&self.modal, Some(Modal::Form(_)))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            match key.code {
+                KeyCode::Char('n') => {
+                    key.code = KeyCode::Char('j');
+                    key.modifiers.remove(KeyModifiers::CONTROL);
+                }
+                KeyCode::Char('p') => {
+                    key.code = KeyCode::Char('k');
+                    key.modifiers.remove(KeyModifiers::CONTROL);
+                }
+                _ => {}
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Effect::Quit;
         }
@@ -367,6 +402,12 @@ impl App {
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
                             return Effect::None;
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.detail_scroll = self.detail_scroll.saturating_add(4)
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.detail_scroll = self.detail_scroll.saturating_sub(4)
                         }
                         KeyCode::PageDown => {
                             self.detail_scroll = self.detail_scroll.saturating_add(8)
@@ -395,11 +436,30 @@ impl App {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => return Effect::None,
                         KeyCode::Down | KeyCode::Char('j') => {
-                            i = (i + 1).min(Action::ALL.len() - 1)
+                            i = (i + 1).min(MenuAction::ALL.len() - 1)
                         }
                         KeyCode::Up | KeyCode::Char('k') => i = i.saturating_sub(1),
+                        KeyCode::PageDown => {
+                            i = (i + self.page_size).min(MenuAction::ALL.len() - 1)
+                        }
+                        KeyCode::PageUp => i = i.saturating_sub(self.page_size),
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            i = (i + (self.page_size / 2).max(1)).min(MenuAction::ALL.len() - 1)
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            i = i.saturating_sub((self.page_size / 2).max(1))
+                        }
                         KeyCode::Enter => {
-                            self.request(Action::ALL[i]);
+                            match MenuAction::ALL[i] {
+                                MenuAction::Edit => {
+                                    if let Err(e) = self.open_form(false) {
+                                        self.error(format!("{e:#}"));
+                                    }
+                                }
+                                MenuAction::Editor => return Effect::Editor,
+                                MenuAction::Log(key) => return Effect::Log(key),
+                                MenuAction::Launchctl(a) => self.request(a),
+                            }
                             return Effect::None;
                         }
                         _ => {}
@@ -419,6 +479,12 @@ impl App {
                             }
                         }
                         KeyCode::Tab => form.focus((form.focus + 1) % form.fields.len()),
+                        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            form.focus((form.focus + 1) % form.fields.len())
+                        }
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            form.focus((form.focus + form.fields.len() - 1) % form.fields.len())
+                        }
                         KeyCode::BackTab => {
                             form.focus((form.focus + form.fields.len() - 1) % form.fields.len())
                         }
@@ -509,33 +575,25 @@ impl App {
             }
             KeyCode::Tab => self.scope_step(1),
             KeyCode::BackTab => self.scope_step(-1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.focus_detail {
-                    self.detail_scroll = self.detail_scroll.saturating_add(1);
-                } else {
-                    self.select(1);
-                }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select(-((self.page_size / 2).max(1) as isize))
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.focus_detail {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
-                } else {
-                    self.select(-1);
-                }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select((self.page_size / 2).max(1) as isize)
             }
-            KeyCode::PageDown => {
-                if self.focus_detail {
-                    self.detail_scroll = self.detail_scroll.saturating_add(10);
-                } else {
-                    self.select(10);
-                }
+            KeyCode::Down | KeyCode::Char('j') => self.select(1),
+            KeyCode::Up | KeyCode::Char('k') => self.select(-1),
+            KeyCode::PageDown => self.select(self.page_size as isize),
+            KeyCode::PageUp => self.select(-(self.page_size as isize)),
+            KeyCode::Char('J') => {
+                self.detail_scroll = self
+                    .detail_scroll
+                    .saturating_add((self.preview_height / 2).max(1))
             }
-            KeyCode::PageUp => {
-                if self.focus_detail {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(10);
-                } else {
-                    self.select(-10);
-                }
+            KeyCode::Char('K') => {
+                self.detail_scroll = self
+                    .detail_scroll
+                    .saturating_sub((self.preview_height / 2).max(1))
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.table.select(Some(0));
@@ -546,25 +604,20 @@ impl App {
                 self.table.select(self.visible.len().checked_sub(1));
                 self.load_detail();
             }
-            KeyCode::Left | KeyCode::Right => {
-                let i = Detail::ALL
-                    .iter()
-                    .position(|d| *d == self.detail)
-                    .unwrap_or(0);
-                let delta = if key.code == KeyCode::Right {
-                    1
-                } else {
-                    Detail::ALL.len() - 1
-                };
-                self.detail = Detail::ALL[(i + delta) % Detail::ALL.len()];
-                self.load_detail();
+            KeyCode::Char(' ') => {
+                if self.selected().is_some() {
+                    self.modal = Some(Modal::Actions(0));
+                }
             }
-            KeyCode::Enter => self.focus_detail = !self.focus_detail,
+            KeyCode::Enter => {
+                if self.selected().is_some() {
+                    return Effect::Editor;
+                }
+            }
             KeyCode::Char('R') => {
                 self.refresh();
                 self.notice = "Refreshed".into();
             }
-            KeyCode::Char('a') => self.modal = Some(Modal::Actions(0)),
             KeyCode::Char('n') => {
                 if let Err(e) = self.open_form(true) {
                     self.error(format!("{e:#}"));
@@ -575,7 +628,6 @@ impl App {
                     self.error(format!("{e:#}"));
                 }
             }
-            KeyCode::Char('E') => return Effect::Editor,
             KeyCode::Char('l') => self.request(Action::Load),
             KeyCode::Char('u') => self.request(Action::Unload),
             KeyCode::Char('s') => self.request(Action::Start),
@@ -586,17 +638,51 @@ impl App {
                 }
             }
             KeyCode::Char('x') => self.request(Action::Delete),
-            KeyCode::Char('p') => {
-                self.detail = Detail::Plist;
-                self.load_detail();
-            }
-            KeyCode::Char('o') => {
-                self.detail = Detail::Logs;
-                self.load_detail();
-            }
             _ => {}
         }
         Effect::None
+    }
+
+    pub fn prepare_log(&self, key: &str) -> Result<LogSession> {
+        ensure!(
+            !self.backend.demo,
+            "Demo mode: sample log files are not available"
+        );
+        let job = self.selected().context("Select a job first")?;
+        let d = job
+            .definition
+            .as_ref()
+            .and_then(Value::as_dictionary)
+            .context("This job has no readable plist")?;
+        let path = d
+            .get(key)
+            .and_then(Value::as_string)
+            .with_context(|| format!("{key} is not configured in this plist"))?;
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            Path::new(
+                d.get("WorkingDirectory")
+                    .and_then(Value::as_string)
+                    .unwrap_or("/"),
+            )
+            .join(path)
+        }
+        .canonicalize()
+        .with_context(|| format!("Opening {key}"))?;
+        ensure!(
+            fs::metadata(&path)?.is_file(),
+            "The log path is not a regular file"
+        );
+        fs::File::open(&path).with_context(|| format!("Reading {}", path.display()))?;
+        let pager = std::env::var("PAGER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "less".into());
+        let argv = shell_words::split(&pager).context("Invalid quoting in $PAGER")?;
+        ensure!(!argv.is_empty(), "$PAGER is empty");
+        Ok(LogSession { path, argv })
     }
 
     /// Prepare a private XML copy. The real plist is committed only after a valid edit.
@@ -665,6 +751,22 @@ impl App {
                     .unwrap_or_else(|e| format!("could not retain temporary file: {e}"))
             ));
         }
+    }
+}
+
+pub struct LogSession {
+    path: PathBuf,
+    argv: Vec<String>,
+}
+impl LogSession {
+    pub fn run(&self) -> Result<()> {
+        let status = Command::new(&self.argv[0])
+            .args(&self.argv[1..])
+            .arg(&self.path)
+            .status()
+            .context("Starting $PAGER")?;
+        ensure!(status.success(), "$PAGER exited with {status}");
+        Ok(())
     }
 }
 
@@ -746,5 +848,85 @@ mod tests {
             panic!("form closed")
         };
         assert_eq!(form.focus, 3);
+        app.handle(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let Some(Modal::Form(form)) = &app.modal else {
+            panic!("form closed")
+        };
+        assert_eq!(form.focus, 2);
+        let text = form.fields[2].clone();
+        app.handle(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        let Some(Modal::Form(form)) = &app.modal else {
+            panic!("form closed")
+        };
+        assert_eq!(form.focus, 3);
+        assert_eq!(form.fields[2], text);
+    }
+    #[test]
+    fn revised_shortcuts_page_jobs_scroll_plist_and_open_actions() {
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        app.page_size = 2;
+        for code in [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('E'),
+            KeyCode::Char('a'),
+            KeyCode::Char('p'),
+            KeyCode::Char('o'),
+        ] {
+            assert!(matches!(
+                app.handle(KeyEvent::new(code, KeyModifiers::NONE)),
+                Effect::None
+            ));
+            assert!(app.modal.is_none());
+            assert_eq!(app.table.selected(), Some(0));
+        }
+        app.handle(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.table.selected(), Some(1));
+        assert!(app.modal.is_none());
+        app.handle(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(app.table.selected(), Some(0));
+        app.handle(key('j'));
+        app.handle(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(app.table.selected(), Some(2));
+        app.handle(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.table.selected(), Some(1));
+        assert!(app.modal.is_none()); // Ctrl-U must not invoke Unload.
+        app.handle(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.table.selected(), Some(3));
+        app.handle(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.table.selected(), Some(1));
+        app.preview_height = 14;
+        app.handle(key('J'));
+        assert_eq!(app.detail_scroll, 7);
+        app.handle(key('K'));
+        assert_eq!(app.detail_scroll, 0);
+        assert!(matches!(
+            app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Effect::Editor
+        ));
+        assert!(app.modal.is_none());
+        app.handle(key(' '));
+        assert!(matches!(app.modal, Some(Modal::Actions(0))));
+        app.handle(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert!(matches!(app.modal, Some(Modal::Actions(1))));
+        app.handle(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(matches!(app.modal, Some(Modal::Actions(0))));
+        app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.modal, Some(Modal::Form(_))));
+        app.handle(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.modal = Some(Modal::Actions(1));
+        assert!(matches!(
+            app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Effect::Editor
+        ));
+        for (index, key) in [(2, "StandardOutPath"), (3, "StandardErrorPath")] {
+            app.modal = Some(Modal::Actions(index));
+            assert!(
+                matches!(app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Effect::Log(k) if k == key)
+            );
+        }
+        app.modal = Some(Modal::Actions(5));
+        app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.modal, Some(Modal::Confirm(Action::Unload, _))));
     }
 }

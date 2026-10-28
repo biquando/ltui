@@ -14,38 +14,39 @@ Use `ltui --demo` to explore sample jobs without changing any files or services.
 ## What it does
 
 - Browse user agents, shared agents, daemons, Apple jobs, and session/system services, including jobs without a plist in the standard directories.
-- Show running PIDs, loaded/idle/unloaded state, last exit status when available, and enabled/disabled policy. Refresh automatically every five seconds or with `R`.
+- Show running PIDs, loaded/idle/unloaded state and enabled/disabled policy. Refresh automatically every five seconds or with `R`.
 - Create and delete jobs; load, unload, enable, disable, run now, restart, reload, and send TERM/KILL/HUP signals.
 - Edit the Label, executable, argument vector, working directory, output paths, RunAtLoad, KeepAlive, start interval, calendar schedules, and environment variables in a form. Keys outside the form are preserved, including throttle, daemon user/group, and dictionary-valued KeepAlive conditions.
 - Edit the entire XML plist using `$EDITOR` (then `$VISUAL`, then `vi`), including binary plists converted to XML for editing. For GUI editors, use a waiting option, such as `EDITOR='code --wait'`.
-- Inspect `launchctl print`, the launch reason (`blame`), and the last 64 KiB of configured stdout/stderr files.
+- View the selected job’s plist in the right panel. Open configured stdout/stderr log files from the actions menu using `$PAGER` (default: `less`).
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `↑`/`↓`, `j`/`k` | Select job |
+| `↑`/`↓`, `j`/`k`, `Ctrl-N`/`Ctrl-P` | Select job (Ctrl-N down, Ctrl-P up) |
 | `Tab` / `Shift-Tab` | Next / previous scope |
 | `/` | Search labels, commands, policy, and runtime state |
 | `Esc` | Clear search / cancel dialog |
-| `←` / `→` | Change detail tab |
-| `Enter` | Focus/unfocus details for scrolling |
-| `PgUp` / `PgDn` | Page through jobs or scroll focused details |
+| `Space` | Open actions: edit, edit with `$EDITOR`, stdout/stderr logs, and launchctl |
+| `Enter` | Open the selected plist in `$EDITOR` |
+| `Ctrl-U` / `Ctrl-D` | Previous / next half page of jobs |
+| `PgUp` / `PgDn` | Previous / next full page of jobs |
+| `J` / `K` | Scroll the plist panel down / up by half its visible height |
 | `g` / `G` | First / last job |
 | `n` | Create job in this scope |
 | `e` | Edit common options |
-| `E` | Edit full plist in `$EDITOR` |
-| `a` | All actions with explanations |
 | `l` / `u` | Load / unload |
 | `s` / `r` | Run now / restart |
 | `t` | Toggle enabled / disabled |
 | `x` | Unload and delete plist |
-| `p` / `o` | Plist / log files |
 | `R` | Refresh |
 | `?` | Help and inventory warnings |
 | `q` / `Ctrl-C` | Quit |
 
-In forms, use `Tab` or `Shift-Tab` to move between fields. Multiline values expand and scroll to keep the cursor visible. `↑`/`↓` move between lines, or between fields at the first/last line; `←`/`→`, `Home`/`End`, Backspace, and Delete edit the current line. `Ctrl-Home`/`Ctrl-End` jump to the start/end of the whole field. Enter inserts a newline in arguments, calendar schedules, and environment variables, and pasting preserves their newlines. Use `Ctrl-U` to clear a field, `Ctrl-S` to save, and `Esc` to cancel. Arguments use shell quoting to separate words. No shell expansion happens: to run shell syntax, specify `/bin/sh -c 'your command'` explicitly.
+Outside forms, `←`, `→`, `E`, `a`, `p`, and `o` have no action. The actions menu has a file section followed by launchctl operations. Use `↑`/`↓`, `j`/`k`, or `Ctrl-N`/`Ctrl-P` to choose an item and Enter to select it. Quit the log pager to return to ltui.
+
+In forms, use `Tab`/`Ctrl-N` for the next field or `Shift-Tab`/`Ctrl-P` for the previous field, including from multiline values. Multiline values expand and scroll to keep the cursor visible. `↑`/`↓` move between lines, or between fields at the first/last line; `←`/`→`, `Home`/`End`, Backspace, and Delete edit the current line. `Ctrl-Home`/`Ctrl-End` jump to the start/end of the whole field. Enter inserts a newline in arguments, calendar schedules, and environment variables, and pasting preserves their newlines. Use `Ctrl-U` to clear a field, `Ctrl-S` to save, and `Esc` to cancel. Arguments use shell quoting to separate words. No shell expansion happens: to run shell syntax, specify `/bin/sh -c 'your command'` explicitly.
 
 Calendar schedules use `Hour=23 Minute=31` for daily at 23:31. Omit a key to match any value. Available keys are `Minute` (0–59), `Hour` (0–23), `Day` (1–31), `Month` (1–12), and `Weekday` (0–7; 0 and 7 are Sunday). Put each schedule on its own line to run at multiple times. `Day` and `Weekday` match either when both are specified. `*` means every minute; leaving the field blank removes the schedule. Existing dictionary and array schedules retain their plist structure.
 
