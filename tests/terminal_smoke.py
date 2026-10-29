@@ -64,6 +64,10 @@ class Session:
                 assert (flags & (termios.ECHO | termios.ICANON)) == (
                     self.flags_before & (termios.ECHO | termios.ICANON)
                 ), "terminal settings were not restored"
+                assert b"\x1b[?1006h" in self.output, "SGR mouse capture was not enabled"
+                assert b"\x1b[?1006l" in self.output, "mouse capture was not disabled"
+                if self.output.count(b"\x1b[?1006h") > 1:
+                    assert self.output.find(b"\x1b[?1006l") < self.output.rfind(b"\x1b[?1006h")
                 return
             self.drain()
         raise AssertionError("app did not quit")
@@ -182,7 +186,56 @@ Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
             session.close()
         finally:
             session.cleanup()
-    print("PTY smoke tests passed: full editor, invalid-edit recovery, form save/paste, terminal restoration")
+        # SGR mouse reports: click existing controls and save only a temporary plist.
+        def click(x, y, button=0):
+            return f"\x1b[<{button};{x+1};{y+1}M\x1b[<{button};{x+1};{y+1}m".encode()
+
+        session = Session(home, "vi")
+        try:
+            session.until(lambda: b"launchd job manager" in session.output)
+            session.send(click(2, 39))  # Main footer is only a key guide.
+            assert b"New job" not in session.output
+            session.send(b"n")
+            session.until(lambda: b"New job" in session.output)
+            session.send(click(26, 5))  # Label value in the form
+            session.send(b"\x15local.mouse-smoke")
+            session.send(click(25, 9))  # ProgramArguments value
+            session.send(b"\x15/usr/bin/true")
+            session.send(click(24, 36))  # Form footer must not trigger Save.
+            created = directory / "local.mouse-smoke.plist"
+            assert not created.exists()
+            session.send(b"\x13")
+            session.until(created.exists)
+            saved = plistlib.loads(created.read_bytes())
+            assert saved["Label"] == "local.mouse-smoke"
+            assert saved["ProgramArguments"] == ["/usr/bin/true"]
+            session.send(click(4, 4))  # Search box
+            session.send(b"local.mouse-smoke\r")
+            session.send(click(5, 9, 2))  # Right-click the filtered job row
+            session.until(lambda: b"Job actions" in session.output)
+            session.send(b"\x1b")
+            session.close()
+        finally:
+            session.cleanup()
+        # A tab before a multibyte character must not produce a cursor inside
+        # that character. Click the wide character, insert text, render, and save.
+        v = plistlib.loads(path.read_bytes())
+        v["WorkingDirectory"] = "\t界a"
+        path.write_bytes(plistlib.dumps(v))
+        session = Session(home, "vi")
+        try:
+            session.until(lambda: b"launchd job manager" in session.output)
+            session.send(b"/" + v["Label"].encode() + b"\r")
+            session.send(b"e")
+            session.until(lambda: b"Edit job" in session.output)
+            session.send(click(26, 11))  # Display column 2 of WorkingDirectory.
+            session.send(b"X\x13")
+            session.until(lambda: plistlib.loads(path.read_bytes())["WorkingDirectory"] == "\tX界a")
+            assert b"panicked at" not in session.output
+            session.close()
+        finally:
+            session.cleanup()
+    print("PTY smoke tests passed: editor, log pager, mouse controls, form save/paste, capture and terminal restoration")
 
 
 if __name__ == "__main__":

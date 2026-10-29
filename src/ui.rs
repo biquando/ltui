@@ -2,7 +2,9 @@ use crate::{
     app::{App, MenuAction, Modal},
     launchd::Action,
     model::{FIELD_NAMES, Form, Scope, State},
+    mouse::{MouseMap, Target, Wheel},
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     buffer::CellWidth,
@@ -69,6 +71,7 @@ fn text(f: &mut Frame, area: Rect, value: impl Into<String>, scroll: u16) {
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    app.mouse = MouseMap::default();
     f.render_widget(Block::new().style(Style::default().bg(BG).fg(FG)), area);
     if area.width < 65 || area.height < 18 {
         f.render_widget(
@@ -123,6 +126,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             "System",
         ]
     };
+    let mut tab_x = rows[1].x;
+    for (index, label) in labels.iter().enumerate() {
+        let width = Line::from(*label).width() as u16 + 1;
+        app.mouse.hit(
+            Rect::new(
+                tab_x,
+                rows[1].y,
+                width.min(rows[1].right().saturating_sub(tab_x)),
+                1,
+            ),
+            Target::Scope(Scope::ALL[index]),
+        );
+        tab_x += width + 1;
+    }
     f.render_widget(
         Tabs::new(labels.to_vec())
             .select(Scope::ALL.iter().position(|s| *s == app.scope))
@@ -146,6 +163,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         " / search jobs".into()
     };
     let info = Layout::horizontal([Constraint::Min(15), Constraint::Length(36)]).split(rows[2]);
+    app.mouse.key(
+        Rect::new(info[0].x, info[0].y, info[0].width, 1),
+        KeyCode::Char('/'),
+    );
     f.render_widget(
         Paragraph::new(search).style(style(if app.searching { ACCENT } else { MUTED })),
         info[0],
@@ -188,28 +209,30 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         })),
         rows[4],
     );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" n", style(ACCENT)),
-            Span::raw(" new  "),
-            Span::styled("Space", style(ACCENT)),
-            Span::raw(" actions  "),
-            Span::styled("Enter", style(ACCENT)),
-            Span::raw(" edit plist  "),
-            Span::styled("R", style(ACCENT)),
-            Span::raw(" refresh  "),
-            Span::styled("?", style(ACCENT)),
-            Span::raw(" help  "),
-            Span::styled("q", style(ACCENT)),
-            Span::raw(" quit"),
-        ])),
-        rows[5],
-    );
+    let guide = Line::from(vec![
+        Span::styled(" n", style(ACCENT)),
+        Span::raw(" new  "),
+        Span::styled("Space", style(ACCENT)),
+        Span::raw(" actions  "),
+        Span::styled("Enter", style(ACCENT)),
+        Span::raw(" edit plist  "),
+        Span::styled("R", style(ACCENT)),
+        Span::raw(" refresh  "),
+        Span::styled("?", style(ACCENT)),
+        Span::raw(" help  "),
+        Span::styled("q", style(ACCENT)),
+        Span::raw(" quit"),
+    ]);
+    if !app.warnings.is_empty() {
+        app.mouse.key(rows[4], KeyCode::Char('?'));
+    }
+    f.render_widget(Paragraph::new(guide), rows[5]);
     draw_modal(f, app);
 }
 
 fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
     app.page_size = area.height.saturating_sub(4).max(1) as usize;
+    app.mouse.wheel(area, Wheel::Jobs);
     let b = block(
         format!(
             " {} · {} ",
@@ -233,35 +256,47 @@ fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
         );
         return;
     }
-    let rows = app.visible.iter().map(|index| {
-        let j = &app.jobs[*index];
-        let name = format!(
-            "{}{}",
-            if j.error.is_some() { "! " } else { "" },
-            clean(&j.label)
-        );
-        let runtime_color = match j.state {
-            State::Running(_) => GREEN,
-            State::Waiting => ACCENT,
-            State::Unloaded => MUTED,
-            State::Unknown => YELLOW,
-        };
-        Row::new(vec![
-            ratatui::widgets::Cell::from(name).style(style(if j.error.is_some() {
-                RED
-            } else {
-                FG
-            })),
-            ratatui::widgets::Cell::from(j.state.text()).style(style(runtime_color)),
-            ratatui::widgets::Cell::from(j.enabled_text()).style(style(
-                if j.disabled == Some(true) {
-                    YELLOW
+    let detached = app
+        .job_scroll
+        .map(|offset| offset.min(app.visible.len().saturating_sub(app.page_size)));
+    let rows = app
+        .visible
+        .iter()
+        .skip(detached.unwrap_or(0))
+        .take(if detached.is_some() {
+            app.page_size
+        } else {
+            usize::MAX
+        })
+        .map(|index| {
+            let j = &app.jobs[*index];
+            let name = format!(
+                "{}{}",
+                if j.error.is_some() { "! " } else { "" },
+                clean(&j.label)
+            );
+            let runtime_color = match j.state {
+                State::Running(_) => GREEN,
+                State::Waiting => ACCENT,
+                State::Unloaded => MUTED,
+                State::Unknown => YELLOW,
+            };
+            Row::new(vec![
+                ratatui::widgets::Cell::from(name).style(style(if j.error.is_some() {
+                    RED
                 } else {
-                    MUTED
-                },
-            )),
-        ])
-    });
+                    FG
+                })),
+                ratatui::widgets::Cell::from(j.state.text()).style(style(runtime_color)),
+                ratatui::widgets::Cell::from(j.enabled_text()).style(style(
+                    if j.disabled == Some(true) {
+                        YELLOW
+                    } else {
+                        MUTED
+                    },
+                )),
+            ])
+        });
     let table = Table::new(
         rows,
         [
@@ -283,13 +318,49 @@ fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
     )
     .highlight_symbol("› ")
     .column_spacing(1);
-    f.render_stateful_widget(table, area, &mut app.table);
+    let offset = if let Some(offset) = detached {
+        // A separate render state lets the viewport move without pulling the
+        // selected job back into view or changing its plist preview.
+        let selected = app
+            .table
+            .selected()
+            .filter(|i| *i >= offset && *i < offset + app.page_size)
+            .map(|i| i - offset);
+        let mut view = ratatui::widgets::TableState::default().with_selected(selected);
+        f.render_stateful_widget(
+            table.highlight_spacing(ratatui::widgets::HighlightSpacing::Always),
+            area,
+            &mut view,
+        );
+        *app.table.offset_mut() = offset;
+        app.job_scroll = Some(offset);
+        offset
+    } else {
+        f.render_stateful_widget(table, area, &mut app.table);
+        app.table.offset()
+    };
+    for row in 0..area.height.saturating_sub(4) {
+        let index = offset + row as usize;
+        if index >= app.visible.len() {
+            break;
+        }
+        app.mouse.hit(
+            Rect::new(
+                area.x + 1,
+                area.y + 3 + row,
+                area.width.saturating_sub(2),
+                1,
+            ),
+            Target::Job(index),
+        );
+    }
 }
 
 fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let b = block(" Plist · J/K scroll ", false);
     let inner = b.inner(area);
     app.preview_height = inner.height;
+    app.mouse.wheel(area, Wheel::Plist);
     f.render_widget(b, area);
     if app.selected().is_some() {
         if inner.width == 0 || inner.height == 0 {
@@ -451,10 +522,11 @@ fn xml_tag_end(text: &str) -> usize {
     text.len()
 }
 
-fn draw_modal(f: &mut Frame, app: &App) {
+fn draw_modal(f: &mut Frame, app: &mut App) {
     let Some(modal) = &app.modal else {
         return;
     };
+    app.mouse = MouseMap::default();
     match modal {
         Modal::Help => {
             let inner = popup(f, centered(f.area(), 86, 34), " Keyboard shortcuts ".into());
@@ -464,6 +536,13 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 value.push_str(&app.warnings.join("\n\n"));
             }
             text(f, inner, value, app.detail_scroll);
+            app.mouse.wheel(inner, Wheel::Dialog);
+            text_hits(
+                f,
+                &mut app.mouse,
+                inner,
+                &[("Enter / Esc / ?", key(KeyCode::Esc))],
+            );
         }
         Modal::Message(title, body) => {
             let inner = popup(f, centered(f.area(), 90, 22), format!(" {title} "));
@@ -473,6 +552,13 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 format!("{body}\n\nEnter / Esc close · PgUp/PgDn scroll"),
                 app.detail_scroll,
             );
+            app.mouse.wheel(inner, Wheel::Dialog);
+            text_hits(
+                f,
+                &mut app.mouse,
+                inner,
+                &[("Enter / Esc close", key(KeyCode::Esc))],
+            );
         }
         Modal::Confirm(action, job) => {
             let inner = popup(
@@ -480,26 +566,40 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 centered(f.area(), 78, 15),
                 format!(" {}? ", action.title()),
             );
-            text(
-                f,
-                inner,
-                format!(
-                    "{}\n\n{}\n\n{}\n\n{}\n\ny confirm · Enter / n / Esc cancel",
-                    job.target(),
-                    action.description(),
-                    job.path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                    if *action == Action::Delete {
-                        "The plist will be permanently removed. Its executable and logs are kept."
-                    } else {
-                        "This affects the selected service only."
-                    }
-                ),
-                0,
+            let value = format!(
+                "{}\n\n{}\n\n{}\n\n{}\n\ny confirm · Enter / n / Esc cancel",
+                job.target(),
+                action.description(),
+                job.path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                if *action == Action::Delete {
+                    "The plist will be permanently removed. Its executable and logs are kept."
+                } else {
+                    "This affects the selected service only."
+                }
             );
+            let footer_row = Paragraph::new(clean(&value))
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width)
+                .saturating_sub(1);
+            text(f, inner, value, 0);
+            // Only the actual footer is actionable, never matching words in
+            // a job label or path. A clipped footer has no mouse targets.
+            if footer_row < inner.height as usize {
+                text_hits(
+                    f,
+                    &mut app.mouse,
+                    Rect::new(inner.x, inner.y + footer_row as u16, inner.width, 1),
+                    &[
+                        ("y confirm", key(KeyCode::Char('y'))),
+                        ("Enter / n / Esc cancel", key(KeyCode::Esc)),
+                    ],
+                );
+            }
         }
+
         Modal::Actions(selected) => {
             let inner = popup(f, centered(f.area(), 86, 29), " Job actions ".into());
             let rows = Layout::vertical([Constraint::Min(6), Constraint::Length(5)]).split(inner);
@@ -530,6 +630,21 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 ));
             }
             f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), rows[0]);
+            app.mouse.wheel(inner, Wheel::Menu);
+            for i in 0..MenuAction::ALL.len() {
+                let line = i + if i < MenuAction::FILE_COUNT { 1 } else { 3 };
+                if line >= scroll && line - scroll < rows[0].height as usize {
+                    app.mouse.hit(
+                        Rect::new(
+                            rows[0].x,
+                            rows[0].y + (line - scroll) as u16,
+                            rows[0].width,
+                            1,
+                        ),
+                        Target::Menu(i),
+                    );
+                }
+            }
             text(
                 f,
                 rows[1],
@@ -538,6 +653,17 @@ fn draw_modal(f: &mut Frame, app: &App) {
                     MenuAction::ALL[*selected].description()
                 ),
                 0,
+            );
+            text_hits(
+                f,
+                &mut app.mouse,
+                rows[1],
+                &[
+                    ("Enter select", key(KeyCode::Enter)),
+                    ("Esc close", key(KeyCode::Esc)),
+                    ("↑", key(KeyCode::Up)),
+                    ("↓", key(KeyCode::Down)),
+                ],
             );
         }
         Modal::Form(form) => {
@@ -564,7 +690,8 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 Paragraph::new(clean(&format!(" {}", destination.display()))).style(style(MUTED)),
                 rows[0],
             );
-            draw_form_fields(f, form, rows[1]);
+            app.mouse.wheel(inner, Wheel::Form);
+            render_form_fields(f, form, rows[1], Some(&mut app.mouse));
             if let Some(error) = &form.error {
                 f.render_widget(
                     Paragraph::new(clean(error))
@@ -585,7 +712,12 @@ fn draw_modal(f: &mut Frame, app: &App) {
     }
 }
 
+#[cfg(test)]
 fn draw_form_fields(f: &mut Frame, form: &Form, area: Rect) {
+    render_form_fields(f, form, area, None);
+}
+
+fn render_form_fields(f: &mut Frame, form: &Form, area: Rect, mut mouse: Option<&mut MouseMap>) {
     // Expand the active field and show a short preview of other multiline fields.
     let heights: Vec<u16> = form
         .fields
@@ -670,7 +802,49 @@ fn draw_form_fields(f: &mut Frame, form: &Form, area: Rect) {
         if let Some(position) = cursor {
             f.set_cursor_position(position);
         }
+        if let Some(mouse) = mouse.as_deref_mut() {
+            mouse.hit(Rect::new(area.x, y, area.width, height), Target::Field(i));
+            mouse.hit(
+                value_area,
+                Target::FieldText {
+                    index: i,
+                    top: scroll.0,
+                    left: scroll.1,
+                },
+            );
+        }
         y += height;
+    }
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+// Match the actual rendered cells, including clipping and wrapped dialog text.
+fn text_hits(f: &mut Frame, mouse: &mut MouseMap, area: Rect, labels: &[(&str, KeyEvent)]) {
+    let buffer = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        let mut text = String::new();
+        let mut positions = Vec::new();
+        for x in area.left()..area.right() {
+            positions.push((text.len(), x));
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        positions.push((text.len(), area.right()));
+        for (label, key) in labels {
+            for (start, _) in text.match_indices(label) {
+                let Some((_, x)) = positions.iter().find(|(byte, _)| *byte == start) else {
+                    continue;
+                };
+                let end = positions
+                    .iter()
+                    .find(|(byte, _)| *byte >= start + label.len())
+                    .unwrap()
+                    .1;
+                mouse.hit(Rect::new(*x, y, end - x, 1), Target::Key(*key));
+            }
+        }
     }
 }
 

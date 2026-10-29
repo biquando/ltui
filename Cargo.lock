@@ -383,6 +383,7 @@ dependencies = [
  "ratatui",
  "shell-words",
  "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]

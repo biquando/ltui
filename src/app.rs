@@ -75,6 +75,7 @@ pub enum Effect {
 }
 
 pub struct App {
+    pub mouse: crate::mouse::MouseMap,
     pub backend: Backend,
     pub scope: Scope,
     pub jobs: Vec<Job>,
@@ -90,11 +91,13 @@ pub struct App {
     pub warnings: Vec<String>,
     pub refreshed: Instant,
     pub page_size: usize,
+    pub job_scroll: Option<usize>,
 }
 
 impl App {
     pub fn new(home: PathBuf, agent_domain: String, scope: Scope, demo: bool) -> Self {
         let mut app = Self {
+            mouse: crate::mouse::MouseMap::default(),
             backend: Backend {
                 runner: Launchctl,
                 home,
@@ -115,6 +118,7 @@ impl App {
             warnings: vec![],
             refreshed: Instant::now(),
             page_size: 10,
+            job_scroll: None,
         };
         app.refresh();
         app
@@ -128,6 +132,7 @@ impl App {
     pub fn refresh(&mut self) {
         let selected = self.selected().map(|j| (j.label.clone(), j.path.clone()));
         let scroll = self.detail_scroll;
+        let job_scroll = self.job_scroll;
         let inventory = self.backend.inventory(self.scope);
         self.jobs = inventory.jobs;
         self.warnings = inventory.warnings;
@@ -151,6 +156,7 @@ impl App {
         self.load_detail();
         if same_selection {
             self.detail_scroll = scroll;
+            self.job_scroll = job_scroll;
         }
     }
     pub fn refilter(&mut self) {
@@ -184,6 +190,7 @@ impl App {
         });
     }
     pub fn load_detail(&mut self) {
+        self.job_scroll = None;
         self.detail_scroll = 0;
         let Some(index) = self
             .table
@@ -207,7 +214,7 @@ impl App {
             }).unwrap_or_else(|e| format!("{e:#}"));
     }
 
-    fn select(&mut self, delta: isize) {
+    pub(crate) fn select(&mut self, delta: isize) {
         if self.visible.is_empty() {
             return;
         }
@@ -228,6 +235,7 @@ impl App {
         self.scope =
             Scope::ALL[(i as isize + delta).rem_euclid(Scope::ALL.len() as isize) as usize];
         self.table.select(None);
+        self.job_scroll = None;
         self.refresh();
     }
     pub fn error(&mut self, error: impl std::fmt::Display) {

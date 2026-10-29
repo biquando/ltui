@@ -1,13 +1,17 @@
 mod app;
 mod launchd;
 mod model;
+mod mouse;
 mod ui;
 
 use anyhow::{Context, Result, bail, ensure};
 use app::{App, Effect, Modal};
 use crossterm::{
     cursor::SetCursorStyle,
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind,
+    },
     execute,
 };
 use model::Scope;
@@ -117,41 +121,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
         if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => match app.handle(key) {
-                    Effect::Quit => break,
-                    Effect::None => {}
-                    Effect::Log(key) => match app.prepare_log(key) {
-                        Err(e) => app.error(format!("{e:#}")),
-                        Ok(session) => {
-                            restore_terminal();
-                            let result = session.run();
-                            *terminal = init_terminal()?;
-                            if let Err(e) = result {
-                                app.error(format!("{e:#}"));
-                            }
-                        }
-                    },
-                    Effect::Editor => match app.prepare_editor() {
-                        Err(e) => app.error(format!("{e:#}")),
-                        Ok(session) => {
-                            restore_terminal();
-                            let edited = session.run();
-                            *terminal = init_terminal()?;
-                            match edited {
-                                Ok(()) => app.finish_editor(session),
-                                Err(e) => {
-                                    let recovery = session
-                                        .temp
-                                        .keep()
-                                        .map(|(_, p)| p.display().to_string())
-                                        .unwrap_or_else(|e| e.to_string());
-                                    app.error(format!("{e:#}\n\nOriginal file unchanged. Temporary copy: {recovery}"));
-                                }
-                            }
-                        }
-                    },
-                },
+            let effect = match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => app.handle(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
                 Event::Paste(contents) => {
                     if let Some(Modal::Form(form)) = &mut app.modal {
                         form.paste(&contents);
@@ -160,8 +132,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
                         app.refilter();
                         app.load_detail();
                     }
+                    Effect::None
                 }
-                _ => {}
+                _ => Effect::None,
+            };
+            if handle_effect(terminal, app, effect)? {
+                break;
             }
         }
         if app.modal.is_none()
@@ -174,11 +150,56 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+fn handle_effect(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    effect: Effect,
+) -> Result<bool> {
+    match effect {
+        Effect::Quit => return Ok(true),
+        Effect::None => {}
+        Effect::Log(key) => match app.prepare_log(key) {
+            Err(e) => app.error(format!("{e:#}")),
+            Ok(session) => {
+                restore_terminal();
+                let result = session.run();
+                *terminal = init_terminal()?;
+                if let Err(e) = result {
+                    app.error(format!("{e:#}"));
+                }
+            }
+        },
+        Effect::Editor => match app.prepare_editor() {
+            Err(e) => app.error(format!("{e:#}")),
+            Ok(session) => {
+                restore_terminal();
+                let edited = session.run();
+                *terminal = init_terminal()?;
+                match edited {
+                    Ok(()) => app.finish_editor(session),
+                    Err(e) => {
+                        let recovery = session
+                            .temp
+                            .keep()
+                            .map(|(_, p)| p.display().to_string())
+                            .unwrap_or_else(|e| e.to_string());
+                        app.error(format!(
+                            "{e:#}\n\nOriginal file unchanged. Temporary copy: {recovery}"
+                        ));
+                    }
+                }
+            }
+        },
+    }
+    Ok(false)
+}
+
 fn init_terminal() -> Result<ratatui::DefaultTerminal> {
     let terminal = ratatui::try_init()?;
     if let Err(e) = execute!(
         std::io::stdout(),
         EnableBracketedPaste,
+        EnableMouseCapture,
         SetCursorStyle::BlinkingBar
     ) {
         restore_terminal();
@@ -189,6 +210,7 @@ fn init_terminal() -> Result<ratatui::DefaultTerminal> {
         let _ = execute!(
             std::io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             SetCursorStyle::DefaultUserShape
         );
         previous(info);
@@ -199,6 +221,7 @@ fn restore_terminal() {
     let _ = execute!(
         std::io::stdout(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         SetCursorStyle::DefaultUserShape
     );
     ratatui::restore();

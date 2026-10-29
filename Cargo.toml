@@ -9,6 +9,7 @@ anyhow = "1"
 crossterm = "0.29"
 libc = "0.2"
 plist = "1"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache", "unstable-rendered-line-info"] }
 shell-words = "1"
 tempfile = "3"
+unicode-segmentation = "1"
