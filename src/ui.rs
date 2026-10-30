@@ -1,5 +1,6 @@
 use crate::{
     app::{App, MenuAction, Modal},
+    error::ErrorReport,
     launchd::Action,
     model::{FIELD_NAMES, Form, Scope, State},
     mouse::{MouseMap, Target, Wheel},
@@ -8,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     buffer::CellWidth,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Paragraph, Row, Table, Tabs, Wrap},
@@ -22,6 +23,8 @@ const ACCENT: Color = Color::Rgb(99, 218, 210);
 const GREEN: Color = Color::Rgb(148, 219, 155);
 const YELLOW: Color = Color::Rgb(245, 204, 122);
 const RED: Color = Color::Rgb(243, 139, 150);
+const ERROR_COMMAND: Color = Color::Rgb(160, 160, 160);
+const ERROR_OUTPUT: Color = Color::Rgb(255, 255, 255);
 const LINE_NUMBER: Color = Color::Rgb(144, 162, 186);
 const XML_TAG: Color = Color::Rgb(166, 202, 240);
 const XML_KEY: Color = Color::Rgb(255, 255, 255);
@@ -30,6 +33,17 @@ const XML_NUMBER: Color = Color::Rgb(249, 216, 155);
 const XML_META: Color = Color::Rgb(166, 184, 208);
 fn style(color: Color) -> Style {
     Style::default().fg(color)
+}
+fn key_guide(bindings: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (key, description)) in bindings.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("    "));
+        }
+        spans.push(Span::styled((*key).to_owned(), style(ACCENT)));
+        spans.push(Span::raw(format!(" {description}")));
+    }
+    Line::from(spans)
 }
 fn block(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
     Block::bordered()
@@ -85,32 +99,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(2),
-        Constraint::Length(2),
         Constraint::Min(6),
         Constraint::Length(2),
         Constraint::Length(1),
     ])
     .split(area);
-    let header = Layout::horizontal([
-        Constraint::Min(20),
-        Constraint::Length(if app.backend.demo { 40 } else { 0 }),
-    ])
-    .split(rows[0]);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" ltui ", style(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("/ launchd job manager", style(FG)),
-        ])),
-        header[0],
-    );
-    if app.backend.demo {
-        f.render_widget(
-            Paragraph::new("DEMO · read-only")
-                .alignment(Alignment::Right)
-                .style(style(ACCENT)),
-            header[1],
-        );
-    }
     let labels = if area.width < 90 {
         [
             "User", "Shared", "Daemon", "A.Agent", "A.Daem", "Session", "System",
@@ -126,14 +119,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             "System",
         ]
     };
-    let mut tab_x = rows[1].x;
+    let mut tab_x = rows[0].x;
     for (index, label) in labels.iter().enumerate() {
         let width = Line::from(*label).width() as u16 + 1;
         app.mouse.hit(
             Rect::new(
                 tab_x,
-                rows[1].y,
-                width.min(rows[1].right().saturating_sub(tab_x)),
+                rows[0].y,
+                width.min(rows[0].right().saturating_sub(tab_x)),
                 1,
             ),
             Target::Scope(Scope::ALL[index]),
@@ -147,7 +140,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .highlight_style(style(BG).bg(ACCENT).add_modifier(Modifier::BOLD))
             .style(style(MUTED))
             .padding("", " "),
-        rows[1],
+        rows[0],
     );
     let running = app
         .jobs
@@ -162,7 +155,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         " / search jobs".into()
     };
-    let info = Layout::horizontal([Constraint::Min(15), Constraint::Length(36)]).split(rows[2]);
+    let info = Layout::horizontal([Constraint::Min(15), Constraint::Length(36)]).split(rows[1]);
     app.mouse.key(
         Rect::new(info[0].x, info[0].y, info[0].width, 1),
         KeyCode::Char('/'),
@@ -181,12 +174,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         info[1],
     );
     let panes = if area.width >= 110 {
-        Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).split(rows[3])
+        Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).split(rows[2])
     } else {
         // Borders, header, and header margin use four rows. Always leave
         // room for a selected job, plus a bordered detail pane below it.
-        let job_height = ((u32::from(rows[3].height) * 48 / 100) as u16).max(5);
-        Layout::vertical([Constraint::Length(job_height), Constraint::Min(3)]).split(rows[3])
+        let job_height = ((u32::from(rows[2].height) * 48 / 100) as u16).max(5);
+        Layout::vertical([Constraint::Length(job_height), Constraint::Min(3)]).split(rows[2])
     };
     draw_jobs(f, app, panes[0]);
     draw_detail(f, app, panes[1]);
@@ -207,7 +200,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         } else {
             YELLOW
         })),
-        rows[4],
+        rows[3],
     );
     let guide = Line::from(vec![
         Span::styled(" n", style(ACCENT)),
@@ -224,9 +217,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Span::raw(" quit"),
     ]);
     if !app.warnings.is_empty() {
-        app.mouse.key(rows[4], KeyCode::Char('?'));
+        app.mouse.key(rows[3], KeyCode::Char('?'));
     }
-    f.render_widget(Paragraph::new(guide), rows[5]);
+    f.render_widget(Paragraph::new(guide), rows[4]);
     draw_modal(f, app);
 }
 
@@ -306,7 +299,7 @@ fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
         ],
     )
     .header(
-        Row::new(["JOB", "RUNTIME / PID", "POLICY"])
+        Row::new(["JOB", "STATUS", "POLICY"])
             .style(style(MUTED))
             .bottom_margin(1),
     )
@@ -357,7 +350,7 @@ fn draw_jobs(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
-    let b = block(" Plist · J/K scroll ", false);
+    let b = block(" Plist ", false);
     let inner = b.inner(area);
     app.preview_height = inner.height;
     app.mouse.wheel(area, Wheel::Plist);
@@ -522,6 +515,37 @@ fn xml_tag_end(text: &str) -> usize {
     text.len()
 }
 
+fn error_text(lines: &mut Vec<Line<'static>>, value: &str, color: Color) {
+    lines.extend(
+        clean(value)
+            .lines()
+            .map(|line| Line::styled(line.to_owned(), style(color))),
+    );
+}
+
+fn error_lines(report: &ErrorReport) -> Vec<Line<'static>> {
+    let Some(command) = &report.command else {
+        return clean(&report.message)
+            .lines()
+            .map(|line| Line::from(line.to_owned()))
+            .collect();
+    };
+    let mut lines = Vec::new();
+    error_text(&mut lines, command, ERROR_COMMAND);
+    if report.stderr.trim().is_empty() && report.stdout.trim().is_empty() {
+        error_text(&mut lines, "(No output.)", ERROR_OUTPUT);
+    } else {
+        for output in [&report.stderr, &report.stdout] {
+            error_text(&mut lines, output.trim_end(), ERROR_OUTPUT);
+        }
+    }
+    if !report.message.is_empty() {
+        lines.push(Line::default());
+        error_text(&mut lines, &report.message, ERROR_OUTPUT);
+    }
+    lines
+}
+
 fn draw_modal(f: &mut Frame, app: &mut App) {
     let Some(modal) = &app.modal else {
         return;
@@ -529,80 +553,142 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
     app.mouse = MouseMap::default();
     match modal {
         Modal::Help => {
-            let inner = popup(f, centered(f.area(), 86, 34), " Keyboard shortcuts ".into());
-            let mut value = "NAVIGATION\n  ↑/↓ or j/k     Select a job (also Ctrl-N/Ctrl-P)\n  Tab/Shift-Tab  Next / previous scope\n  /              Filter jobs · Esc clears the filter\n  Space          Open actions (edit, $EDITOR, logs, launchctl)\n  Enter          Open the selected plist in $EDITOR\n  Ctrl-U/Ctrl-D  Previous / next half page of jobs\n  PgUp/PgDn      Previous / next full page of jobs\n  J/K            Scroll the plist down/up by half its visible height\n  g/G            First / last job\n\nJOBS\n  n              Create a plist in the current scope\n  e              Edit common options (other keys are preserved)\n  l/u            Load / unload\n  s/r            Run now / restart\n  t              Toggle enabled / disabled\n  x              Unload and delete the plist (requires y confirmation)\n  R              Refresh (also automatically every 5 seconds)\n  q/Ctrl-C       Quit\n\nFORMS\n  Tab/Shift-Tab  Move fields (also Ctrl-N/Ctrl-P) · Ctrl-U clears\n  ↑/↓            Move between lines (between fields at edges)\n  ←/→ Home/End   Move within a line · Ctrl-Home/End whole field\n  Enter          Insert newline in arguments/calendar/environment\n  Ctrl-S         Save · Esc cancel\n\nSystem jobs require root for changes. Apple plists are read-only.\nEnter / Esc / ? closes help. PgUp/PgDn or Ctrl-U/Ctrl-D scrolls help.".to_string();
+            let inner = popup(f, centered(f.area(), 86, 34), " Keyboard shortcuts ".into())
+                .inner(Margin::new(2, 1));
+            let rows = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            let mut value = "NAVIGATION\n  ↑/↓ or j/k     Select a job (also Ctrl-N/Ctrl-P)\n  Tab/Shift-Tab  Next / previous scope\n  /              Filter jobs · Esc clears the filter\n  Space          Open actions (edit, $EDITOR, logs, launchctl)\n  Enter          Open the selected plist in $EDITOR\n  Ctrl-U/Ctrl-D  Previous / next half page of jobs\n  PgUp/PgDn      Previous / next full page of jobs\n  J/K            Scroll the plist down/up by half its visible height\n  g/G            First / last job\n\nJOBS\n  n              Create a plist in the current scope\n  e              Edit common options (other keys are preserved)\n  l/u            Load / unload\n  s/r            Run now / restart\n  t              Toggle enabled / disabled\n  x              Unload and delete the plist (requires y confirmation)\n  R              Refresh (also automatically every 5 seconds)\n  q/Ctrl-C       Quit\n\nFORMS\n  Tab/Shift-Tab  Move fields (also Ctrl-N/Ctrl-P) · Ctrl-U clears\n  ↑/↓            Move between lines (between fields at edges)\n  ←/→ Home/End   Move within a line · Ctrl-Home/End whole field\n  Enter          Insert newline in arguments/calendar/environment\n  Ctrl-S         Save · Esc cancel\n\nSystem jobs require root for changes. Apple plists are read-only.".to_string();
             if !app.warnings.is_empty() {
                 value.push_str("\n\nINVENTORY WARNINGS\n");
                 value.push_str(&app.warnings.join("\n\n"));
             }
-            text(f, inner, value, app.detail_scroll);
-            app.mouse.wheel(inner, Wheel::Dialog);
+            let body = Paragraph::new(clean(&value)).wrap(Wrap { trim: false });
+            let max_scroll = body
+                .line_count(rows[0].width)
+                .saturating_sub(rows[0].height as usize)
+                .min(u16::MAX as usize) as u16;
+            app.detail_scroll = app.detail_scroll.min(max_scroll);
+            f.render_widget(body.scroll((app.detail_scroll, 0)), rows[0]);
+            f.render_widget(
+                Paragraph::new(key_guide(&[("↑↓", "scroll"), ("Esc", "close")])),
+                rows[2],
+            );
+            app.mouse.wheel(rows[0], Wheel::Dialog);
             text_hits(
                 f,
                 &mut app.mouse,
-                inner,
-                &[("Enter / Esc / ?", key(KeyCode::Esc))],
+                rows[2],
+                &[
+                    ("↑", key(KeyCode::Up)),
+                    ("↓", key(KeyCode::Down)),
+                    ("Esc close", key(KeyCode::Esc)),
+                ],
             );
         }
         Modal::Message(title, body) => {
-            let inner = popup(f, centered(f.area(), 90, 22), format!(" {title} "));
-            text(
-                f,
-                inner,
-                format!("{body}\n\nEnter / Esc close · PgUp/PgDn scroll"),
-                app.detail_scroll,
+            let width = 78.min(f.area().width.saturating_sub(2));
+            let body = Paragraph::new(error_lines(body)).wrap(Wrap { trim: false });
+            let line_count = body.line_count(width.saturating_sub(6));
+            let height = line_count.saturating_add(6).clamp(8, 22) as u16;
+            let area = centered(f.area(), width, height);
+            let border = block(
+                Line::from(vec![
+                    Span::styled(" ✖ ", style(RED)),
+                    Span::raw(format!("{title} ")),
+                ]),
+                true,
             );
-            app.mouse.wheel(inner, Wheel::Dialog);
+            let inner = border.inner(area).inner(Margin::new(2, 1));
+            f.render_widget(Clear, area);
+            f.render_widget(border, area);
+            let rows = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            // Keep the close control visible even when the error is long.
+            let max_scroll = line_count
+                .saturating_sub(rows[0].height as usize)
+                .min(u16::MAX as usize) as u16;
+            app.detail_scroll = app.detail_scroll.min(max_scroll);
+            f.render_widget(body.scroll((app.detail_scroll, 0)), rows[0]);
+            f.render_widget(Paragraph::new(key_guide(&[("Esc", "close")])), rows[2]);
+            app.mouse.wheel(rows[0], Wheel::Dialog);
             text_hits(
                 f,
                 &mut app.mouse,
-                inner,
-                &[("Enter / Esc close", key(KeyCode::Esc))],
+                rows[2],
+                &[("Esc close", key(KeyCode::Esc))],
             );
         }
         Modal::Confirm(action, job) => {
             let inner = popup(
                 f,
-                centered(f.area(), 78, 15),
+                centered(f.area(), 70, 10),
                 format!(" {}? ", action.title()),
-            );
-            let value = format!(
-                "{}\n\n{}\n\n{}\n\n{}\n\ny confirm · Enter / n / Esc cancel",
-                job.target(),
-                action.description(),
-                job.path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-                if *action == Action::Delete {
-                    "The plist will be permanently removed. Its executable and logs are kept."
-                } else {
-                    "This affects the selected service only."
-                }
-            );
-            let footer_row = Paragraph::new(clean(&value))
+            )
+            .inner(Margin::new(2, 1));
+            let subject = Paragraph::new(clean(&job.label))
                 .wrap(Wrap { trim: false })
+                .style(style(FG).add_modifier(Modifier::BOLD));
+            let subject_height = subject
                 .line_count(inner.width)
-                .saturating_sub(1);
-            text(f, inner, value, 0);
-            // Only the actual footer is actionable, never matching words in
-            // a job label or path. A clipped footer has no mouse targets.
-            if footer_row < inner.height as usize {
-                text_hits(
-                    f,
-                    &mut app.mouse,
-                    Rect::new(inner.x, inner.y + footer_row as u16, inner.width, 1),
-                    &[
-                        ("y confirm", key(KeyCode::Char('y'))),
-                        ("Enter / n / Esc cancel", key(KeyCode::Esc)),
-                    ],
-                );
-            }
+                .max(1)
+                .min(inner.height.saturating_sub(4).max(1) as usize)
+                as u16;
+            let rows = Layout::vertical([
+                Constraint::Length(subject_height),
+                Constraint::Length(1),
+                Constraint::Min(2),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            f.render_widget(subject, rows[0]);
+            let description = match action {
+                Action::Unload => "Stop this job and unload it.",
+                Action::Disable => "Disable future loads. A running instance will keep running.",
+                Action::Restart => "Stop the running instance and start it again.",
+                Action::Stop => "Send SIGTERM. The job may start again automatically.",
+                Action::Kill => "Send SIGKILL. The job may start again automatically.",
+                Action::Hup => "Send SIGHUP to the running process.",
+                Action::Reload => "Unload this job and load the saved plist.",
+                Action::Delete => "Unload this job and permanently delete its plist.",
+                _ => action.description(),
+            };
+            f.render_widget(
+                Paragraph::new(description).wrap(Wrap { trim: false }),
+                rows[2],
+            );
+            f.render_widget(
+                Paragraph::new(key_guide(&[("y", "confirm"), ("Esc", "cancel")])),
+                rows[3],
+            );
+            text_hits(
+                f,
+                &mut app.mouse,
+                rows[3],
+                &[
+                    ("y confirm", key(KeyCode::Char('y'))),
+                    ("Esc cancel", key(KeyCode::Esc)),
+                ],
+            );
         }
 
         Modal::Actions(selected) => {
-            let inner = popup(f, centered(f.area(), 86, 29), " Job actions ".into());
-            let rows = Layout::vertical([Constraint::Min(6), Constraint::Length(5)]).split(inner);
+            let inner = popup(f, centered(f.area(), 86, 29), " Job actions ".into())
+                .inner(Margin::new(2, 1));
+            let rows = Layout::vertical([
+                Constraint::Min(6),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
             let selected_line = selected
                 + if *selected < MenuAction::FILE_COUNT {
                     1
@@ -645,19 +731,19 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
                     );
                 }
             }
-            text(
-                f,
-                rows[1],
-                format!(
-                    "{}\n\n↑↓ choose · Enter select · Esc close",
-                    MenuAction::ALL[*selected].description()
-                ),
-                0,
+            text(f, rows[1], MenuAction::ALL[*selected].description(), 0);
+            f.render_widget(
+                Paragraph::new(key_guide(&[
+                    ("↑↓", "choose"),
+                    ("Enter", "select"),
+                    ("Esc", "close"),
+                ])),
+                rows[3],
             );
             text_hits(
                 f,
                 &mut app.mouse,
-                rows[1],
+                rows[3],
                 &[
                     ("Enter select", key(KeyCode::Enter)),
                     ("Esc close", key(KeyCode::Esc)),
@@ -669,9 +755,9 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         Modal::Form(form) => {
             let area = centered(f.area(), 100, 38);
             let title = if form.path.is_some() {
-                " Edit job · other keys are preserved "
+                " Edit job"
             } else {
-                " New job · saved unloaded "
+                " New job"
             };
             let inner = popup(f, area, title.into());
             let rows = Layout::vertical([
@@ -682,7 +768,7 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
                 } else {
                     form.field_help().lines().count() as u16
                 }),
-                Constraint::Length(2),
+                Constraint::Length(1),
             ])
             .split(inner);
             let destination = form.path.clone().unwrap_or_else(|| app.create_dir());
@@ -707,7 +793,14 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
                     rows[2],
                 );
             }
-            f.render_widget(Paragraph::new(" Ctrl-S save · Esc cancel · Tab/Ctrl-N next · Shift-Tab/Ctrl-P prev\n ↑↓ line/field · Enter newline in args/calendar/env · Home/End line").style(style(ACCENT)), rows[3]);
+            f.render_widget(
+                Paragraph::new(key_guide(&[
+                    ("↑↓", "move"),
+                    ("Ctrl-S", "save"),
+                    ("Esc", "cancel"),
+                ])),
+                rows[3].inner(Margin::new(1, 0)),
+            );
         }
     }
 }
@@ -958,7 +1051,6 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let rendered = screen(&terminal);
         assert!(rendered.contains("MESSAGE='hello world'"));
-        assert!(rendered.contains("separated by spaces or newlines"));
     }
     #[test]
     fn renders_all_views_and_modals_at_supported_sizes() {
@@ -1029,6 +1121,213 @@ mod tests {
         app.modal = Some(Modal::Actions(MenuAction::ALL.len() - 1));
         small.draw(|f| draw(f, &mut app)).unwrap();
         assert!(screen(&small).contains("› Delete job"));
+    }
+    #[test]
+    fn confirmation_dialog_is_compact_and_keeps_both_choices_visible() {
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        for (width, height) in [(65, 18), (120, 40)] {
+            for action in [
+                Action::Delete,
+                Action::Disable,
+                Action::Unload,
+                Action::Restart,
+                Action::Reload,
+                Action::Stop,
+                Action::Kill,
+                Action::Hup,
+            ] {
+                app.modal = Some(Modal::Confirm(action, Box::new(app.jobs[0].clone())));
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| draw_modal(f, &mut app)).unwrap();
+                let rendered = screen(&terminal);
+                assert!(rendered.contains(&format!("{}?", action.title())));
+                assert!(rendered.contains("local.backup"));
+                assert!(rendered.contains("y confirm"));
+                assert!(rendered.contains("Esc cancel"));
+                assert!(!rendered.contains("/tmp/demo"));
+                assert!(!rendered.contains("Enter / n"));
+                assert_eq!(app.mouse.hits.len(), 2);
+            }
+        }
+    }
+    #[test]
+    fn popup_guides_keep_keys_distinct_and_visible_at_supported_sizes() {
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        for (width, height) in [(65, 18), (120, 40)] {
+            for modal in [
+                Modal::Help,
+                Modal::Actions(MenuAction::ALL.len() - 1),
+                Modal::Form(Box::new(Form::new())),
+            ] {
+                app.modal = Some(modal);
+                app.detail_scroll = u16::MAX;
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| draw_modal(f, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let (x, y) = buffer
+                    .content
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, cell)| {
+                        let x = (i % width as usize) as u16;
+                        let y = (i / width as usize) as u16;
+                        (cell.symbol() == "E"
+                            && cell.fg == ACCENT
+                            && x + 3 < width
+                            && buffer[(x + 1, y)].symbol() == "s"
+                            && buffer[(x + 2, y)].symbol() == "c")
+                            .then_some((x, y))
+                    })
+                    .expect("Esc must remain visible in every popup guide");
+                assert_eq!(buffer[(x + 2, y)].fg, ACCENT);
+                assert_eq!(buffer[(x + 4, y)].fg, FG);
+                let rendered = screen(&terminal);
+                if matches!(app.modal, Some(Modal::Form(_))) {
+                    for guide in ["Ctrl-S save", "↑↓ move", "Esc cancel"] {
+                        assert!(
+                            rendered.contains(guide),
+                            "Missing {guide} at {width}x{height}"
+                        );
+                    }
+                    assert!(
+                        app.mouse
+                            .hits
+                            .iter()
+                            .all(|(_, t)| !matches!(t, Target::Key(_)))
+                    );
+                } else {
+                    assert!(rendered.contains("Esc close"));
+                    assert!(
+                        app.mouse.hits.iter().any(|(_, t)| {
+                            matches!(t, Target::Key(k) if k.code == KeyCode::Esc)
+                        })
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn error_popup_sizes_to_content_and_keeps_esc_close_visible_when_scrolling() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+        for (width, height) in [(65, 18), (120, 40)] {
+            for body in [
+                "Permission denied.".into(),
+                (0..100)
+                    .map(|i| format!("Detail {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ] {
+                let long = body.contains("Detail 99");
+                app.error(body);
+                app.detail_scroll = u16::MAX;
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| draw_modal(f, &mut app)).unwrap();
+                let rendered = screen(&terminal);
+                assert!(rendered.contains("Esc close"));
+                assert!(!rendered.contains("Enter /"));
+                assert!(!rendered.contains("PgUp/PgDn"));
+                assert!(rendered.contains(if long {
+                    "Detail 99"
+                } else {
+                    "Permission denied."
+                }));
+                if !long {
+                    assert_eq!(app.detail_scroll, 0);
+                }
+                let area = app
+                    .mouse
+                    .hits
+                    .iter()
+                    .find(|(_, t)| matches!(t, Target::Key(k) if k.code == KeyCode::Esc))
+                    .unwrap()
+                    .0;
+                app.handle_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: area.x,
+                    row: area.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert!(app.modal.is_none());
+            }
+        }
+    }
+    #[test]
+    fn command_errors_use_color_and_spacing_without_section_labels() {
+        use crate::error::CommandFailure;
+        let failure = CommandFailure::new(
+            &["kickstart".into(), "gui/501/test".into()],
+            "stdout details".into(),
+            "stderr details".into(),
+            "Enable the job first.".into(),
+        );
+        let report = ErrorReport::from_error(anyhow::Error::new(failure));
+        let lines = error_lines(&report);
+        for (value, color) in [
+            ("launchctl kickstart gui/501/test", ERROR_COMMAND),
+            ("stderr details", ERROR_OUTPUT),
+            ("stdout details", ERROR_OUTPUT),
+            ("Enable the job first.", ERROR_OUTPUT),
+        ] {
+            assert!(
+                lines.iter().any(|line| line
+                    .spans
+                    .iter()
+                    .any(|span| span.content == value
+                        && line.style.patch(span.style).fg == Some(color))),
+                "Missing {value}: {report:?}"
+            );
+        }
+        let message_row = lines
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content == "Enable the job first.")
+            })
+            .unwrap();
+        assert!(lines[message_row - 1].spans.is_empty());
+        assert!(!lines[message_row - 2].spans.is_empty());
+        for label in ["COMMAND", "LAUNCHCTL OUTPUT", "LTUI", "stdout:", "stderr:"] {
+            assert!(
+                !lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .any(|span| span.content == label)
+            );
+        }
+        for (w, h) in [(65, 18), (120, 40)] {
+            let mut app = App::new("/tmp/demo".into(), "gui/501".into(), Scope::User, true);
+            app.report_error(anyhow::Error::new(CommandFailure::new(
+                &["kickstart".into(), "gui/501/test".into()],
+                "stdout details".into(),
+                "stderr details".into(),
+                "Enable the job first.".into(),
+            )));
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw_modal(f, &mut app)).unwrap();
+            let mut rendered = screen(&terminal);
+            assert!(rendered.contains('✖'));
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .any(|cell| cell.symbol() == "✖" && cell.fg == RED)
+            );
+            app.detail_scroll = u16::MAX;
+            terminal.draw(|f| draw_modal(f, &mut app)).unwrap();
+            rendered.push_str(&screen(&terminal));
+            for label in [
+                "Esc close",
+                "stdout details",
+                "stderr details",
+                "Enable the job first.",
+            ] {
+                assert!(rendered.contains(label), "Missing {label}");
+            }
+        }
     }
     #[test]
     fn plist_scrolling_stops_at_the_last_full_view() {

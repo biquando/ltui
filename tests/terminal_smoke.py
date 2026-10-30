@@ -114,7 +114,7 @@ Path(sys.argv[3]).write_text(str(p))
             command = shlex.join([sys.executable, str(editor), "two words", mode, str(record)])
             session = Session(home, command)
             try:
-                session.until(lambda: b"launchd job manager" in session.output)
+                session.until(lambda: b"POLICY" in session.output)
                 session.send(b"\r" if mode == "valid" else b" j\r")
                 session.until(record.exists)
                 if mode == "valid":
@@ -153,7 +153,7 @@ Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
             pager = shlex.join([sys.executable, str(pager_script), "two words", str(pager_record)])
             session = Session(home, "vi", pager=pager)
             try:
-                session.until(lambda: b"launchd job manager" in session.output)
+                session.until(lambda: b"POLICY" in session.output)
                 session.send(b" " + b"j" * index + b"\r")
                 session.until(pager_record.exists)
                 assert pager_record.read_text() == log.read_text()
@@ -163,7 +163,7 @@ Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
         # Exercise the built-in form and bracketed paste without ever loading a job.
         session = Session(home, "vi")
         try:
-            session.until(lambda: b"launchd job manager" in session.output)
+            session.until(lambda: b"POLICY" in session.output)
             session.send(b"n")
             session.send(b"\x15local.form-smoke")  # clear Label, type a new one
             session.send(b"\t\t\x15")  # clear ProgramArguments
@@ -192,7 +192,7 @@ Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
 
         session = Session(home, "vi")
         try:
-            session.until(lambda: b"launchd job manager" in session.output)
+            session.until(lambda: b"POLICY" in session.output)
             session.send(click(2, 39))  # Main footer is only a key guide.
             assert b"New job" not in session.output
             session.send(b"n")
@@ -209,9 +209,9 @@ Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
             saved = plistlib.loads(created.read_bytes())
             assert saved["Label"] == "local.mouse-smoke"
             assert saved["ProgramArguments"] == ["/usr/bin/true"]
-            session.send(click(4, 4))  # Search box
+            session.send(click(4, 2))  # Search box
             session.send(b"local.mouse-smoke\r")
-            session.send(click(5, 9, 2))  # Right-click the filtered job row
+            session.send(click(5, 7, 2))  # Right-click the filtered job row
             session.until(lambda: b"Job actions" in session.output)
             session.send(b"\x1b")
             session.close()
@@ -224,7 +224,7 @@ Path(sys.argv[2]).write_text(Path(sys.argv[-1]).read_text())
         path.write_bytes(plistlib.dumps(v))
         session = Session(home, "vi")
         try:
-            session.until(lambda: b"launchd job manager" in session.output)
+            session.until(lambda: b"POLICY" in session.output)
             session.send(b"/" + v["Label"].encode() + b"\r")
             session.send(b"e")
             session.until(lambda: b"Edit job" in session.output)

@@ -69,7 +69,7 @@ New plists are saved unloaded. Saving an existing loaded job offers to reload it
 
 The job's name is its `Label`. Changing it keeps the original filename. Unload before renaming a loaded job so its old service is not left running. Duplicate Labels are rejected when loading or saving.
 
-Edits use a private temporary copy. The original is replaced atomically after plist parsing and validation of common launchd keys. Disk changes made during editing are detected. Failed external edits retain a recovery copy and display its path. Existing permissions and ownership are preserved; symlinked plists update the target while keeping the symlink. Deleting a symlinked job removes the symlink, leaving its target file intact. Delete requires confirmation and unloads the job before removing the plist; executables and log files are kept.
+Edits use a private temporary copy. The original is replaced atomically after plist parsing and validation of common launchd keys. Disk changes made during editing are detected. Failed external edits retain a recovery copy and display its path. Existing permissions and ownership are preserved; symlinked plists update the target while keeping the symlink. Deleting a symlinked job removes the symlink, leaving its target file intact. Confirmation dialogs accept `y` to confirm or `Esc` to cancel. Delete requires confirmation and unloads the job before removing the plist; executables and log files are kept.
 
 ## Scopes and permissions
 

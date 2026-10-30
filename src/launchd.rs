@@ -1,3 +1,4 @@
+use crate::error::CommandFailure;
 use crate::model::{self, Job, Scope, State};
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
@@ -25,19 +26,23 @@ impl Runner for Launchctl {
             .stdout(stdout.try_clone()?)
             .stderr(stderr.try_clone()?)
             .spawn()
-            .context("Starting /bin/launchctl (macOS is required)")?;
+            .map_err(|e| {
+                CommandFailure::new(
+                    args,
+                    String::new(),
+                    String::new(),
+                    format!("Could not start /bin/launchctl (macOS is required): {e}"),
+                )
+            })?;
         let start = Instant::now();
         let status = loop {
             if let Some(status) = child.try_wait()? {
-                break status;
+                break Some(status);
             }
             if start.elapsed() > Duration::from_secs(8) {
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!(
-                    "launchctl {} timed out after 8 seconds. Refresh to check the job's state",
-                    shell_words::join(args)
-                );
+                break None;
             }
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -47,13 +52,16 @@ impl Runner for Launchctl {
         let mut err = String::new();
         stdout.take(4 * 1024 * 1024).read_to_string(&mut out)?;
         stderr.take(64 * 1024).read_to_string(&mut err)?;
-        ensure!(
-            status.success(),
-            "launchctl {}\n{}{}\nSystem jobs may require running ltui with sudo; Apple jobs may be protected by macOS.",
-            shell_words::join(args),
-            err.trim(),
-            out.trim()
-        );
+        let message = match status {
+            None => Some("Timed out after 8 seconds. Refresh to check the job's state.".into()),
+            Some(status) if !status.success() => Some(format!(
+                "launchctl failed ({status}).\nSystem jobs may require running ltui with sudo; Apple jobs may be protected by macOS."
+            )),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(CommandFailure::new(args, out, err, message).into());
+        }
         Ok(out)
     }
 }
@@ -650,6 +658,24 @@ fn demo_inventory(scope: Scope, home: &Path, agent_domain: &str) -> Inventory {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn real_read_only_launchctl_failure_keeps_command_output_and_explanation_separate() {
+        let args = vec!["print".into(), "ltui-invalid-domain-for-test".into()];
+        let error = Launchctl.run(&args).unwrap_err();
+        let failure = error.downcast_ref::<CommandFailure>().unwrap();
+        assert_eq!(
+            failure.command,
+            "launchctl print ltui-invalid-domain-for-test"
+        );
+        assert!(!failure.stdout.is_empty() || !failure.stderr.is_empty());
+        assert!(failure.message.contains("launchctl failed"));
+        assert!(
+            !failure
+                .stderr
+                .contains("System jobs may require running ltui")
+        );
+    }
     struct Fake {
         calls: RefCell<Vec<Vec<String>>>,
         fail: Option<String>,

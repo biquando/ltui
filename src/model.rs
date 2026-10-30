@@ -85,8 +85,8 @@ pub enum State {
 impl State {
     pub fn text(&self) -> String {
         match self {
-            Self::Running(pid) => format!("running · {pid}"),
-            Self::Waiting => "loaded · idle".into(),
+            Self::Running(pid) => format!("running ({pid})"),
+            Self::Waiting => "loaded".into(),
             Self::Unloaded => "unloaded".into(),
             Self::Unknown => "unknown".into(),
         }
@@ -332,7 +332,7 @@ pub fn save(path: &Path, value: &Value, expected: Option<&[u8]>) -> Result<()> {
 pub const FIELD_NAMES: [&str; 11] = [
     "Label",
     "Program (optional executable override)",
-    "ProgramArguments (quoted argv, no shell expansion)",
+    "ProgramArguments",
     "WorkingDirectory",
     "StandardOutPath",
     "StandardErrorPath",
@@ -340,7 +340,7 @@ pub const FIELD_NAMES: [&str; 11] = [
     "KeepAlive (true / false / blank)",
     "StartInterval (seconds)",
     "StartCalendarInterval (one schedule per line)",
-    "EnvironmentVariables (KEY=value; quote spaces in values)",
+    "EnvironmentVariables (KEY=value)",
 ];
 const KEYS: [&str; 11] = [
     "Label",
@@ -548,14 +548,19 @@ impl Form {
     }
     pub fn field_help(&self) -> &'static str {
         match KEYS[self.focus] {
+            "ProgramArguments" => {
+                "Example: /usr/bin/head -n10 '/tmp/my file.txt'\nUse quotes for arguments with spaces. Does not support shell expansion."
+            }
             "StartCalendarInterval" => {
-                "Example: Hour=23 Minute=31 (daily 23:31).\nUse one schedule per line. Omitted keys match any value.\nMinute 0–59; Hour 0–23; Day 1–31; Month 1–12.\nWeekday 0–7 (0/7 Sun). Day + Weekday match either.\nBlank removes; * means every minute."
+                "Example: Hour=23 Minute=31 (daily 23:31).\nMissing fields are wildcards. Semantics are similar to crontab(5).\nAllowed fields are Minute, Hour, Day, Weekday, and Month."
             }
             "EnvironmentVariables" => {
-                "Use KEY=value pairs, separated by spaces or newlines.\nQuote spaces: MODE=dev MESSAGE='hello world'\nEmpty value: EMPTY=''. No export, commas, or expansion.\nBlank clears all variables."
+                // "Use KEY=value pairs, separated by spaces or newlines.\nQuote spaces: MODE=dev MESSAGE='hello world'\nEmpty value: EMPTY=''. No export, commas, or expansion.\nBlank clears all variables."
+                "Example: MODE=dev MESSAGE='hello world'\nNo export, commas, or expansion."
             }
             _ => {
-                "Label changes keep the filename. Unload before renaming.\nEnter opens the full plist in $EDITOR from the job list."
+                // "Label changes keep the filename. Unload before renaming.\nEnter opens the full plist in $EDITOR from the job list."
+                ""
             }
         }
     }

@@ -1,4 +1,5 @@
 mod app;
+mod error;
 mod launchd;
 mod model;
 mod mouse;
@@ -159,18 +160,18 @@ fn handle_effect(
         Effect::Quit => return Ok(true),
         Effect::None => {}
         Effect::Log(key) => match app.prepare_log(key) {
-            Err(e) => app.error(format!("{e:#}")),
+            Err(e) => app.report_error(e),
             Ok(session) => {
                 restore_terminal();
                 let result = session.run();
                 *terminal = init_terminal()?;
                 if let Err(e) = result {
-                    app.error(format!("{e:#}"));
+                    app.report_error(e);
                 }
             }
         },
         Effect::Editor => match app.prepare_editor() {
-            Err(e) => app.error(format!("{e:#}")),
+            Err(e) => app.report_error(e),
             Ok(session) => {
                 restore_terminal();
                 let edited = session.run();

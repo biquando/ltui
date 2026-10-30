@@ -420,11 +420,11 @@ mod tests {
             Box::new(job),
         ));
         render(&mut app, 65, 18);
-        assert!(
-            !app.mouse.hits.iter().any(
-                |(_, target)| matches!(target, Target::Key(k) if k.code == KeyCode::Char('y'))
-            )
-        );
+        // The shorter dialog keeps its actual choices visible even when the
+        // plist path is long; path text is no longer part of the dialog.
+        assert_eq!(app.mouse.hits.len(), 2);
+        click_key(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
     }
     #[test]
     fn footer_clicks_are_inert_and_form_values_still_place_the_cursor() {

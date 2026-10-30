@@ -1,3 +1,4 @@
+use crate::error::ErrorReport;
 use crate::{
     launchd::{Action, Backend, Launchctl},
     model::{self, Form, Job, Scope, State},
@@ -65,7 +66,7 @@ pub enum Modal {
     Actions(usize),
     Confirm(Action, Box<Job>),
     Form(Box<Form>),
-    Message(String, String),
+    Message(String, ErrorReport),
 }
 pub enum Effect {
     None,
@@ -239,11 +240,14 @@ impl App {
         self.refresh();
     }
     pub fn error(&mut self, error: impl std::fmt::Display) {
+        self.show_error(error.to_string().into());
+    }
+    pub fn report_error(&mut self, error: anyhow::Error) {
+        self.show_error(ErrorReport::from_error(error));
+    }
+    fn show_error(&mut self, error: ErrorReport) {
         self.detail_scroll = 0;
-        self.modal = Some(Modal::Message(
-            "Could not complete action".into(),
-            error.to_string(),
-        ));
+        self.modal = Some(Modal::Message("Could not complete action".into(), error));
     }
     fn request(&mut self, action: Action) {
         let Some(job) = self.selected().cloned() else {
@@ -272,7 +276,7 @@ impl App {
             }
             Err(e) => {
                 self.refresh();
-                self.error(format!("{e:#}"));
+                self.report_error(e);
             }
         }
     }
@@ -401,7 +405,10 @@ impl App {
                 _ => {}
             }
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+            && !matches!(&self.modal, Some(Modal::Confirm(_, _)))
+        {
             return Effect::Quit;
         }
         if let Some(modal) = self.modal.take() {
@@ -434,10 +441,8 @@ impl App {
                     self.modal = Some(modal);
                 }
                 Modal::Confirm(action, job) => match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => self.perform(action, &job),
-                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Enter => {
-                        self.notice = "Cancelled".into()
-                    }
+                    KeyCode::Char('y') if key.modifiers.is_empty() => self.perform(action, &job),
+                    KeyCode::Esc if key.modifiers.is_empty() => self.notice = "Cancelled".into(),
                     _ => self.modal = Some(Modal::Confirm(action, job)),
                 },
                 Modal::Actions(mut i) => {
@@ -461,7 +466,7 @@ impl App {
                             match MenuAction::ALL[i] {
                                 MenuAction::Edit => {
                                     if let Err(e) = self.open_form(false) {
-                                        self.error(format!("{e:#}"));
+                                        self.report_error(e);
                                     }
                                 }
                                 MenuAction::Editor => return Effect::Editor,
@@ -628,12 +633,12 @@ impl App {
             }
             KeyCode::Char('n') => {
                 if let Err(e) = self.open_form(true) {
-                    self.error(format!("{e:#}"));
+                    self.report_error(e);
                 }
             }
             KeyCode::Char('e') => {
                 if let Err(e) = self.open_form(false) {
-                    self.error(format!("{e:#}"));
+                    self.report_error(e);
                 }
             }
             KeyCode::Char('l') => self.request(Action::Load),
@@ -752,12 +757,12 @@ impl App {
         })();
         if let Err(e) = result {
             let recovery = session.temp.keep().map(|(_, p)| p);
-            self.error(format!(
-                "{e:#}\n\nYour original plist was preserved. Edited copy: {}",
-                recovery
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|e| format!("could not retain temporary file: {e}"))
-            ));
+            self.report_error(e.context(format!(
+                    "Your original plist was preserved. Edited copy: {}",
+                    recovery
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|e| format!("could not retain temporary file: {e}"))
+                )));
         }
     }
 }
@@ -817,7 +822,18 @@ mod tests {
         app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         app.handle(key('x'));
         assert!(matches!(app.modal, Some(Modal::Confirm(Action::Delete, _))));
-        app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for key in [
+            key('n'),
+            key('q'),
+            key('Y'),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        ] {
+            assert!(matches!(app.handle(key), Effect::None));
+            assert!(matches!(app.modal, Some(Modal::Confirm(Action::Delete, _))));
+        }
+        app.handle(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.modal.is_none());
         assert_eq!(app.jobs.len(), 6);
     }
